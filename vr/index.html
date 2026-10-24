@@ -29,7 +29,14 @@
     const enterBtn = document.getElementById("enter");
 
     // Scene: one floating score panel. Passthrough stays on so the player can see the real arm.
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    } catch (err) {
+      enterBtn.textContent = "WebGL not available in this browser";
+      statusEl.textContent = String(err.message || err);
+      throw err;
+    }
     renderer.setSize(innerWidth, innerHeight);
     renderer.setPixelRatio(devicePixelRatio);
     renderer.xr.enabled = true;
