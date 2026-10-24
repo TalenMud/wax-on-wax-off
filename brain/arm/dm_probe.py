@@ -1,14 +1,14 @@
-"""Read-only probe for RobStride motors in MIT-protocol mode (how our B601-RS arms ship).
+"""Read-only probe for our B601 arms' motors, which speak the Damiao CAN protocol.
 
-    python -m brain.arm.mit_probe can0 can1              # one reading
-    python -m brain.arm.mit_probe can0 can1 --seconds 20 # track min/max while you move an arm by hand
+    python -m brain.arm.dm_probe can0 can1              # one reading
+    python -m brain.arm.dm_probe can0 can1 --seconds 20 # track min/max while you move an arm by hand
 
-Sends only the MIT fault-status query (standard frame, data FF*6 00 FB), which never
-enables torque.
+Sends only the Damiao management-channel status request (std id 0x7FF, data id 00 CC ...),
+which is never interpreted as motion. Do NOT probe with FF*6 xx FB/FC/FD frames: unless bytes
+0-6 are all FF, a Damiao motor decodes the frame as an MIT command (pos max, kp 500).
 
-Position scale: lerobot and maker-arm-sdk decode with +-12.57 rad (4*pi), but hand tests on
-2026-10-23 (left base 90 deg -> 171 deg, left wrist_roll 90 deg -> 184 deg) show these motors
-use +-2*pi. PMAX below is the measured value. Left arm = can0; outward base rotation is negative.
+Facts read from the motors on 2026-10-23: PMAX=6.28 rad on all joints; replies come from
+0x10+id; can0 = left arm (outward base rotation is negative).
 """
 
 import argparse
@@ -19,7 +19,6 @@ import time
 
 from .interface import JOINT_NAMES
 
-QUERY = bytes([0xFF] * 6 + [0x00, 0xFB])
 PMAX = 2 * math.pi
 
 
@@ -39,7 +38,7 @@ def read_raw(s: socket.socket) -> dict[int, int]:
     """Query motors 1..7 and return {motor_id: position u16}."""
     out: dict[int, int] = {}
     for mid in range(1, 8):
-        s.send(struct.pack("=IB3x8s", mid, 8, QUERY))
+        s.send(struct.pack("=IB3x8s", 0x7FF, 8, bytes([mid, 0, 0xCC, 0, 0, 0, 0, 0])))
         end = time.monotonic() + 0.02
         while mid not in out and time.monotonic() < end:
             try:
@@ -47,7 +46,9 @@ def read_raw(s: socket.socket) -> dict[int, int]:
             except socket.timeout:
                 continue
             data = raw[8:16]
-            out[data[0]] = (data[1] << 8) | data[2]
+            if data[2] == 0x33:  # register reply, not status
+                continue
+            out[data[0] & 0x0F] = (data[1] << 8) | data[2]
     return out
 
 

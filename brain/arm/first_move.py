@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from .mit_bus import MitBus
+from .dm_bus import DmBus, encode_mit
 
 MAX_DELTA_DEG = 10.0
 MAX_SPEED_DEG_S = 10.0
@@ -53,13 +53,21 @@ def main() -> None:
     log_path = Path("logs") / f"first_move-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     log_path.parent.mkdir(exist_ok=True)
     log = log_path.open("w")
-    bus = MitBus(a.channel)
+    bus = DmBus(a.channel)
     mid = a.motor
     try:
+        lim = bus.load_limits(mid)
         fb = bus.query(mid)
         if fb is None:
             raise Abort("no feedback before enable")
+        if fb.err not in (0, 1):  # Damiao: 0 disabled, 1 enabled; >=8 are faults
+            raise Abort(f"motor reports error code {fb.err:#x}")
         start = fb.pos_rad
+        q = encode_mit(start, a.kp, a.kd, lim)
+        echo = ((q[0] << 8) | q[1]) / 65535 * 2 * lim.pmax - lim.pmax
+        if abs(echo - start) > math.radians(0.1):
+            raise Abort(f"encode/decode mismatch {math.degrees(echo - start):.3f} deg")
+        print(f"limits {lim}", flush=True)
         delta = math.radians(a.delta)
         print(f"start {math.degrees(start):.2f} deg; enabling motor {mid} on {a.channel}", flush=True)
 
