@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TalenMud/wax-on-wax-off/shared/schema.json",
+  "title": "Wax On Wax Off hub protocol",
+  "description": "JSON messages over WebSocket at ws://<robot-laptop-ip>:8765. Change only via PR.",
+  "version": 1,
+  "oneOf": [
+    { "$ref": "#/$defs/state" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/command" }
+  ],
+  "$defs": {
+    "vec3": {
+      "description": "[x, y, z] in metres, camera frame. null when not tracked.",
+      "oneOf": [
+        { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+        { "type": "null" }
+      ]
+    },
+    "pad_target": {
+      "enum": ["high_left", "high_right", "mid_left", "mid_right", null]
+    },
+    "difficulty": {
+      "enum": ["easy", "medium", "hard"]
+    },
+    "state": {
+      "description": "hub -> clients, ~20 Hz",
+      "type": "object",
+      "required": ["type", "t", "round", "arm", "player", "score", "coach", "latency_ms"],
+      "properties": {
+        "type": { "const": "state" },
+        "t": { "type": "number", "description": "unix seconds" },
+        "round": {
+          "type": "object",
+          "required": ["status", "number", "time_left_s", "difficulty"],
+          "properties": {
+            "status": { "enum": ["idle", "countdown", "active", "paused", "stopped"] },
+            "number": { "type": "integer", "minimum": 0 },
+            "time_left_s": { "type": "number", "minimum": 0 },
+            "difficulty": { "$ref": "#/$defs/difficulty" }
+          }
+        },
+        "arm": {
+          "type": "object",
+          "required": ["connected", "estop", "joints_deg", "pad_target"],
+          "properties": {
+            "connected": { "type": "boolean" },
+            "estop": { "type": "boolean" },
+            "joints_deg": {
+              "type": "object",
+              "required": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "gripper"],
+              "properties": {
+                "shoulder_pan": { "type": "number" },
+                "shoulder_lift": { "type": "number" },
+                "elbow_flex": { "type": "number" },
+                "wrist_flex": { "type": "number" },
+                "wrist_yaw": { "type": "number" },
+                "wrist_roll": { "type": "number" },
+                "gripper": { "type": "number" }
+              }
+            },
+            "pad_target": { "$ref": "#/$defs/pad_target" }
+          }
+        },
+        "player": {
+          "type": "object",
+          "required": ["tracked", "left_hand", "right_hand", "head"],
+          "properties": {
+            "tracked": { "type": "boolean" },
+            "left_hand": { "$ref": "#/$defs/vec3" },
+            "right_hand": { "$ref": "#/$defs/vec3" },
+            "head": { "$ref": "#/$defs/vec3" }
+          }
+        },
+        "score": {
+          "type": "object",
+          "required": ["hits", "misses", "combo_streak", "avg_reaction_ms"],
+          "properties": {
+            "hits": { "type": "integer", "minimum": 0 },
+            "misses": { "type": "integer", "minimum": 0 },
+            "combo_streak": { "type": "integer", "minimum": 0 },
+            "avg_reaction_ms": { "type": ["number", "null"] }
+          }
+        },
+        "coach": {
+          "type": "object",
+          "required": ["combo", "line"],
+          "properties": {
+            "combo": { "type": "array", "items": { "type": "string" } },
+            "line": { "type": "string" }
+          }
+        },
+        "latency_ms": {
+          "type": "object",
+          "description": "Per-stage latencies. camera, pose, control expected; extra keys allowed.",
+          "additionalProperties": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "event": {
+      "description": "hub -> clients, sent once per occurrence",
+      "type": "object",
+      "required": ["type", "t", "kind"],
+      "properties": {
+        "type": { "const": "event" },
+        "t": { "type": "number" },
+        "kind": { "enum": ["hit", "miss", "block", "round_start", "round_end", "estop", "error"] },
+        "hand": { "enum": ["left", "right"] },
+        "pad_target": { "$ref": "#/$defs/pad_target" },
+        "reaction_ms": { "type": "number" },
+        "message": { "type": "string" }
+      }
+    },
+    "command": {
+      "description": "client -> hub",
+      "type": "object",
+      "required": ["type", "action"],
+      "properties": {
+        "type": { "const": "command" },
+        "action": { "enum": ["start_round", "pause", "stop", "estop", "reset_score", "set_difficulty"] },
+        "difficulty": { "$ref": "#/$defs/difficulty" }
+      },
+      "if": { "properties": { "action": { "const": "set_difficulty" } } },
+      "then": { "required": ["difficulty"] }
+    }
+  }
+}
