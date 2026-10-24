@@ -25,14 +25,8 @@ async function liveSessions(ctx: QueryCtx) {
   return await ctx.db.query("sessions").withIndex("by_status", (q) => q.eq("status", "live")).collect();
 }
 
-// The one session driving the real arms, if any. Simulated sessions never touch the rig, so
-// several can run at once alongside it.
-async function rigSession(ctx: QueryCtx) {
-  return (await liveSessions(ctx)).find((s) => !s.simulated) ?? null;
-}
-
-// Anyone can sign up on the public URL, so moving the real arms (or un-latching E-STOP) is only
-// for the player linked to the headset: the link code is only visible to someone at the booth.
+// Anyone can sign up on the public URL, so the real arms are only for the player linked to the
+// headset: the link code is only visible to someone at the booth.
 function requireLinked(rig: Doc<"rigs">, userId: Id<"users">, action: string) {
   if (linkedPlayer(rig, Date.now()) !== userId) {
     throw new ConvexError({ code: "NOT_LINKED", message: `Link the headset first to ${action}: enter the code shown in it.` });
@@ -58,7 +52,6 @@ export const rig = query({
     const playerId = rig?.playerId ?? null;
     return {
       lastSeenAt: rig?.lastSeenAt ?? 0,
-      estop: rig?.estop ?? false,
       linkedToMe: !!userId && playerId === userId,
       linkedAt: rig?.playerAt ?? 0,
     };
@@ -99,7 +92,6 @@ export const start = mutation({
     if (!simulate) {
       const rig = await ensureRig(ctx);
       requireLinked(rig, userId, "use the real rig");
-      if (rig.estop) throw new ConvexError("E-STOP is latched. Reset it before starting.");
       await ctx.db.patch(rig._id, { playerAt: now });
     }
 
@@ -124,28 +116,6 @@ export const stop = mutation({
     if (!s || s.status !== "live") return;
     if (s.userId !== userId) throw new ConvexError("Only the player can stop this session.");
     await ctx.db.patch(sessionId, { status: "stopped", endedAt: Date.now(), activeArm: undefined });
-  },
-});
-
-// Any signed-in user can hit E-STOP, whoever's session it is. Safety beats ownership.
-export const estop = mutation({
-  args: {},
-  handler: async (ctx) => {
-    await requireUser(ctx);
-    const rig = await ensureRig(ctx);
-    await ctx.db.patch(rig._id, { estop: true });
-    const live = await rigSession(ctx);
-    if (live) await ctx.db.patch(live._id, { status: "stopped", endedAt: Date.now(), activeArm: undefined });
-  },
-});
-
-export const resetEstop = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await requireUser(ctx);
-    const rig = await ensureRig(ctx);
-    requireLinked(rig, userId, "reset E-STOP");
-    await ctx.db.patch(rig._id, { estop: false });
   },
 });
 

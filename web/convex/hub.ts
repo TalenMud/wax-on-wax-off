@@ -42,7 +42,7 @@ export const poll = internalMutation({
         : null;
     return {
       serverNow: now,
-      estop: rig.estop,
+      estop: false, // no phone E-STOP any more; kept for brain/convex_bridge.py
       session,
       linkCode: rig.linkCode,
       player: playerId ? await displayName(ctx, playerId) : null,
@@ -76,7 +76,6 @@ export const start = internalMutation({
     const now = Date.now();
     const rig = await ctx.db.query("rigs").withIndex("by_name", (q) => q.eq("name", "main")).unique();
     if (!rig) return { ok: false, error: "rig not set up" };
-    if (rig.estop) return { ok: false, error: "E-STOP is latched" };
     const userId = linkedPlayer(rig, now);
     if (!userId) return { ok: false, error: "no player linked" };
     const live = await ctx.db.query("sessions").withIndex("by_status", (q) => q.eq("status", "live")).collect();

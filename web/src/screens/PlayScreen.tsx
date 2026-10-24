@@ -3,7 +3,6 @@ import type { FunctionReturnType } from "convex/server";
 import { useEffect, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { bestKey, DIFFICULTIES, MODES, type Difficulty, type Mode } from "../../convex/game";
-import { EstopButton } from "../components/EstopButton";
 import { HeadsetLink } from "../components/HeadsetLink";
 import { useRigStatus } from "../components/RigPill";
 import { buzz, errorMessage, formatClock, learnServerTime, useNow } from "../lib";
@@ -19,7 +18,6 @@ export function PlayScreen({ live }: { live: Live }) {
   const [busy, setBusy] = useState(false);
   const bests = useQuery(api.sessions.personalBests) ?? {};
   const start = useMutation(api.sessions.start);
-  const resetEstop = useMutation(api.sessions.resetEstop);
 
   // No robot connected? Default to the built-in simulator so the app is always demoable.
   useEffect(() => {
@@ -27,8 +25,8 @@ export function PlayScreen({ live }: { live: Live }) {
   }, [rig.loaded, rig.online]);
 
   const busyElsewhere = live && !live.mine;
-  // Simulated sessions don't touch the arms, so they're allowed while the rig is busy or E-STOPped.
-  const blocked = !simulate && (!!busyElsewhere || rig.estop);
+  // Simulated sessions don't touch the arms, so they're allowed while the rig is busy.
+  const blocked = !simulate && !!busyElsewhere;
 
   async function go() {
     setBusy(true);
@@ -45,17 +43,6 @@ export function PlayScreen({ live }: { live: Live }) {
 
   return (
     <div className="stack">
-      {rig.estop && (
-        <div className="banner banner-danger">
-          <div>
-            <strong>E-STOP is latched</strong>
-            <p>Check the arms and the area are clear, then reset.</p>
-          </div>
-          <button className="btn btn-light" onClick={() => void resetEstop().catch((err) => setError(errorMessage(err)))}>
-            Reset
-          </button>
-        </div>
-      )}
       {busyElsewhere && <BusyBanner live={live} />}
       {rig.online && <HeadsetLink />}
 
@@ -143,7 +130,6 @@ function BusyBanner({ live }: { live: NonNullable<Live> }) {
           {MODES[live.session.mode].label} · {live.session.hits} hits · {formatClock(left)} left
         </p>
       </div>
-      <EstopButton compact />
     </div>
   );
 }

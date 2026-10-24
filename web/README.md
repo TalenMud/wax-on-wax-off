@@ -1,7 +1,7 @@
 # Wax On Wax Off: phone app
 
 Phone-first web app for the sparring rig. A friend or coach holds the phone while the player wears the
-headset: pick a session, start it, watch hits land live, hit E-STOP if anything goes wrong. Every
+headset: pick a session, start it, watch hits land live, stop the round if anything goes wrong. Every
 session is saved to the player's account with personal bests and a leaderboard.
 
 Built on **Convex** (database, auth, real-time sync, scheduled jobs, HTTP endpoints for the robot)
@@ -21,10 +21,11 @@ with React + Vite.
   finishes it, and strikes outside the window are rejected.
 - Only one arm presents at a time. Sides alternate in random runs (`maxRun` per difficulty).
 - No robot? The app defaults to a **simulated rig** (`convex/simulate.ts`) so it is always demoable.
-- **Headset link:** anyone can sign up on the public URL, so starting a session on the real arms (or
-  resetting E-STOP) is only for the player linked to the headset. The headset lobby shows a 6-character code;
+- **Headset link:** anyone can sign up on the public URL, so starting a session on the real arms is
+  only for the player linked to the headset. The headset lobby shows a 6-character code;
   entering it on the Train tab links that account for 10 minutes after last use, and a right-hand pinch in the
-  headset then starts a round on it. Practice sessions and E-STOP itself never need a link.
+  headset then starts a round on it. Practice sessions never need a link. There is no phone E-STOP: the arms' own stop is
+  Ctrl+C or power at the laptop.
 
 ## Sessions and scoring (`convex/game.ts`)
 
@@ -36,7 +37,7 @@ with React + Vite.
 
 A hit scores 100 if under 400 ms, 75 if under 600 ms, otherwise 50, plus 10 per hit of current streak (capped at +100).
 A miss resets the streak. Personal bests and the leaderboard are tracked per mode + difficulty.
-Sessions ended early or by E-STOP are saved but not ranked. Robot and practice (simulated) sessions have separate
+Sessions ended early are saved but not ranked. Robot and practice (simulated) sessions have separate
 leaderboards and personal bests.
 
 These numbers come from reaction-drill norms. Simple visual reaction takes about 200–250 ms. Seeing a target and
@@ -78,7 +79,7 @@ Both endpoints need the header `Authorization: Bearer $HUB_SECRET` and live on t
 
 - `GET /hub/poll`: heartbeat ("Rig online" on the phone) plus state:
   `{ serverNow, estop, session: null | { id, mode, difficulty, durationS, startsAt, endsAt, windowMs, maxRun, gapMs } }`.
-  Poll about 4×/s. If `estop` is true, stop the arms immediately.
+  Poll about 4×/s. `estop` is always false now (kept for compatibility).
 - `POST /hub/event` `{ sessionId, kind: "present" | "hit" | "miss", arm: "left" | "right", reactionMs? }`.
   Send `present` when a pad goes up, then exactly one `hit` (with reaction time from presentation) or `miss`.
   Returns `{ accepted: false }` once the session is over or stopped, so the hub should stop then.

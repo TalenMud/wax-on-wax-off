@@ -547,7 +547,7 @@
     }
 
     // ---------------------------------------------------------------- phone app link (tools/serve_xr.py)
-    const rig = { reachable: false, online: false, estop: false, session: null, error: "connecting", offset: 0, linkCode: null, player: null };
+    const rig = { reachable: false, online: false, session: null, error: "connecting", offset: 0, linkCode: null, player: null };
     async function pollRig() {
       const t0 = Date.now();
       try {
@@ -555,7 +555,7 @@
         const j = await r.json();
         const t1 = Date.now();
         if (t1 - t0 < 300) rig.offset = j.now - (t0 + t1) / 2;   // laptop clock minus headset clock
-        Object.assign(rig, { reachable: true, online: j.online, estop: j.estop, session: j.session, error: j.error, linkCode: j.linkCode, player: j.player });
+        Object.assign(rig, { reachable: true, online: j.online, session: j.session, error: j.error, linkCode: j.linkCode, player: j.player });
       } catch {
         Object.assign(rig, { reachable: false, online: false, session: null, error: "laptop server unreachable" });
       }
@@ -738,15 +738,6 @@
 
     function updateGame() {
       const now = now0();
-      // E-STOP from the phone overrides everything.
-      if (rig.estop && game.state !== "estop") {
-        if (game.state === "round" || game.state === "countdown") endRound("estop");
-        game.state = "estop";
-        sfx.miss();
-      } else if (!rig.estop && game.state === "estop") {
-        game.state = "lobby";
-      }
-
       // A new phone session takes over the lobby, the results screen, or a practice round.
       const s = rig.session;
       const idle = game.state === "lobby" || game.state === "results" ||
@@ -805,9 +796,9 @@
       const W = canvas.width, H = canvas.height;
       const now = now0();
       ctx.clearRect(0, 0, W, H);
-      const accent = game.state === "estop" ? "#ff3344" : game.state === "round" ? "#ffd60a" : "#3a86ff";
+      const accent = game.state === "round" ? "#ffd60a" : "#3a86ff";
       rr(ctx, 6, 6, W - 12, H - 12, 40);
-      ctx.fillStyle = game.state === "estop" ? "rgba(70,8,14,0.9)" : "rgba(14,14,22,0.86)";
+      ctx.fillStyle = "rgba(14,14,22,0.86)";
       ctx.fill();
       ctx.lineWidth = 8;
       ctx.strokeStyle = accent;
@@ -923,7 +914,7 @@
         const avg = game.hits ? Math.round(game.reactionSum / game.hits) : 0;
         ctx.font = font(64);
         ctx.fillStyle = game.reason === "done" ? "#ffd60a" : "#ff9f9f";
-        ctx.fillText(game.reason === "done" ? "ROUND OVER" : game.reason === "estop" ? "STOPPED: E-STOP" : "STOPPED FROM PHONE", W / 2, 90);
+        ctx.fillText(game.reason === "done" ? "ROUND OVER" : "STOPPED FROM PHONE", W / 2, 90);
         ctx.font = font(170);
         ctx.fillStyle = "#fff";
         ctx.fillText(String(game.score), W / 2, 255);
@@ -956,14 +947,6 @@
         const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : rig.online ? "link a phone to play" : "pinch right to practice";
         ctx.fillText(game.source === "phone" ? `Saved to ${game.player || "your account"} · ${next}` : `Not saved · ${next}`, W / 2, H - 46);
         if (game.notice) { ctx.fillStyle = "#ff9f9f"; ctx.fillText(game.notice, W / 2, H - 96); }
-      } else if (game.state === "estop") {
-        ctx.font = font(170);
-        ctx.fillStyle = "#ff3344";
-        ctx.fillText("E-STOP", W / 2, 300);
-        ctx.font = "500 40px system-ui";
-        ctx.fillStyle = "#fff";
-        ctx.fillText("Stopped from the phone app.", W / 2, 400);
-        ctx.fillText(rig.player ? `${rig.player} can reset it on their phone.` : `Link a phone with ${rig.linkCode || "the code"}, then reset it there.`, W / 2, 455);
       }
       panel.tex.needsUpdate = true;
     }

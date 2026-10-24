@@ -3,7 +3,6 @@ import type { FunctionReturnType } from "convex/server";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { DIFFICULTIES, MODES, reactionRating, type Arm } from "../../convex/game";
-import { EstopButton } from "../components/EstopButton";
 import { avg, buzz, formatClock, useNow } from "../lib";
 
 type Live = NonNullable<FunctionReturnType<typeof api.sessions.live>>;
@@ -108,8 +107,6 @@ export function LiveScreen({ live }: { live: Live }) {
           <span className="hint">Waiting for the first pad…</span>
         )}
       </div>
-
-      <EstopButton />
 
       {countdownMs > 0 && (
         <div className="countdown" role="status">
