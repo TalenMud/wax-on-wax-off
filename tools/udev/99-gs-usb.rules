@@ -1,0 +1,2 @@
+# candleLight / gs_usb CAN adapters: let plugdev users open them (MakerMods Lab)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", MODE="0664", GROUP="plugdev"

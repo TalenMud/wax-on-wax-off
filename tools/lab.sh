@@ -11,11 +11,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v uv >/dev/null; then
-  echo "uv is required: brew install uv   (or see https://docs.astral.sh/uv/)" >&2
+  echo "uv is required: brew install uv, or curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
   exit 1
 fi
 if [ ! -f tools/makermodslab/pyproject.toml ]; then
   git submodule update --init tools/makermodslab
 fi
 
-exec uv tool run --python 3.12 --from ./tools/makermodslab makermodslab "$@"
+# gs-usb + pyusb let Lab open the candleLight CAN adapters directly as gs_usb:<serial> (Linux,
+# needs tools/udev/99-gs-usb.rules installed).
+exec uv tool run --python 3.12 --with gs-usb==0.3.1 --with pyusb --from ./tools/makermodslab makermodslab "$@"

@@ -20,8 +20,17 @@ to check the pad poses, and check the cameras** before running the game.
 
 ```bash
 git submodule update --init      # first time only (or clone with --recursive)
-tools/lab.sh                     # http://localhost:8000; needs uv (brew install uv)
+tools/lab.sh                     # http://localhost:8000; needs uv
 ```
+
+On Linux, let your user open the CAN adapters (candleLight, `1d50:606f`) once, then replug them:
+
+```bash
+sudo cp tools/udev/99-gs-usb.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules
+```
+
+In Lab they show up as `gs_usb:<serial>` ports, not `can0`/`can1`. Lab only scans `/dev/video0`-`9`, so if a
+camera drops out, quit Lab, replug the cameras, then start it again.
 
 It runs in its own environment because it pins its own LeRobot fork. Lab and the game hub **can't share the
 CAN bus**, so quit Lab before starting the hub. The real arm's `connect()` calls
