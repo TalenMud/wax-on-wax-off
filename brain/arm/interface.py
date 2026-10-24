@@ -25,7 +25,8 @@ class ArmInterface(Protocol):
     connected: bool
     estopped: bool
 
-    def connect(self) -> None: ...
+    def connect(self) -> None:
+        """Real arms call brain.arm.lab.ensure_bus_free() first: MakerMods Lab may hold the CAN bus."""
 
     def disconnect(self) -> None:
         """Disable torque and close the bus."""

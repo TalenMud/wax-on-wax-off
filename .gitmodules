@@ -1,0 +1,3 @@
+[submodule "tools/makermodslab"]
+	path = tools/makermodslab
+	url = https://github.com/makermods-robotics/makermodslab
