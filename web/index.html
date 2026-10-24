@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wax On Wax Off</title>
+  <style>
+    :root { --bg: #111; --fg: #eee; --muted: #888; --hit: #3c6; --miss: #e54; }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 16px system-ui, sans-serif; }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+    .tile { background: #1c1c1c; border-radius: 8px; padding: 12px 16px; min-width: 120px; }
+    .tile b { display: block; font-size: 28px; }
+    .tile span { color: var(--muted); font-size: 13px; }
+    button { background: #333; color: var(--fg); border: 0; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button.stop { background: var(--miss); }
+    pre { background: #1c1c1c; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 12px; }
+    #events div.hit { color: var(--hit); } #events div.miss { color: var(--miss); }
+  </style>
+</head>
+<body>
+  <h1>Wax On Wax Off <small id="conn" style="color:var(--muted)">connecting…</small></h1>
+  <div class="row">
+    <div class="tile"><b id="hits">0</b><span>hits</span></div>
+    <div class="tile"><b id="misses">0</b><span>misses</span></div>
+    <div class="tile"><b id="streak">0</b><span>streak</span></div>
+    <div class="tile"><b id="reaction">–</b><span>avg reaction ms</span></div>
+    <div class="tile"><b id="time">0</b><span>time left (s)</span></div>
+  </div>
+  <div class="row">
+    <button data-action="start_round">Start round</button>
+    <button data-action="pause">Pause</button>
+    <button data-action="reset_score">Reset score</button>
+    <button class="stop" data-action="estop">E-STOP</button>
+  </div>
+  <div class="row"><div class="tile" style="flex:1"><span>coach</span><div id="coach"></div></div></div>
+  <div class="row">
+    <div style="flex:1;min-width:280px"><span>events</span><div id="events"></div></div>
+    <div style="flex:1;min-width:280px"><span>latest state</span><pre id="state"></pre></div>
+  </div>
+  <script>
+    // Hub address: ?hub=ws://192.168.x.x:8765, defaults to this host.
+    const hubUrl = new URLSearchParams(location.search).get("hub") || `ws://${location.hostname || "localhost"}:8765`;
+    const $ = (id) => document.getElementById(id);
+    let ws;
+
+    function connect() {
+      ws = new WebSocket(hubUrl);
+      ws.onopen = () => ($("conn").textContent = `connected to ${hubUrl}`);
+      ws.onclose = () => { $("conn").textContent = "disconnected, retrying…"; setTimeout(connect, 1000); };
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "state") renderState(msg);
+        else if (msg.type === "event") renderEvent(msg);
+      };
+    }
+
+    function renderState(s) {
+      $("hits").textContent = s.score.hits;
+      $("misses").textContent = s.score.misses;
+      $("streak").textContent = s.score.combo_streak ?? 0;
+      $("reaction").textContent = s.score.avg_reaction_ms ?? "–";
+      $("time").textContent = s.round.time_left_s;
+      $("coach").textContent = s.coach ? `${s.coach.combo.join(" → ")} · ${s.coach.line}` : "";
+      $("state").textContent = JSON.stringify(s, null, 1);
+    }
+
+    function renderEvent(ev) {
+      const div = document.createElement("div");
+      div.className = ev.kind;
+      div.textContent = `${new Date(ev.t * 1000).toLocaleTimeString()} ${ev.kind} ${ev.hand ?? ""} ${ev.reaction_ms ? ev.reaction_ms + " ms" : ""}`;
+      $("events").prepend(div);
+      while ($("events").children.length > 20) $("events").lastChild.remove();
+    }
+
+    document.querySelectorAll("button[data-action]").forEach((b) =>
+      b.addEventListener("click", () => ws?.readyState === 1 && ws.send(JSON.stringify({ type: "command", action: b.dataset.action })))
+    );
+    connect();
+  </script>
+</body>
+</html>

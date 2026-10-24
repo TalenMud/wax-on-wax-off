@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wax On Wax Off VR</title>
+  <style>
+    body { margin: 0; background: #111; color: #eee; font: 16px system-ui, sans-serif; }
+    #ui { position: absolute; inset: 16px auto auto 16px; }
+    button { font-size: 18px; padding: 12px 18px; border: 0; border-radius: 8px; background: #3c6; color: #111; }
+    button:disabled { background: #444; color: #999; }
+    #status { margin-top: 8px; color: #999; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="enter" disabled>Checking WebXR…</button>
+    <div id="status">connecting to hub…</div>
+  </div>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+
+    // Hub address: ?hub=ws://192.168.x.x:8765, defaults to this host.
+    const hubUrl = new URLSearchParams(location.search).get("hub") || `ws://${location.hostname || "localhost"}:8765`;
+    const statusEl = document.getElementById("status");
+    const enterBtn = document.getElementById("enter");
+
+    // Scene: one floating score panel. Passthrough stays on so the player can see the real arm.
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 50);
+    camera.position.set(0, 1.6, 0);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 1024;
+    canvas.height = 512;
+    const ctx = canvas.getContext("2d");
+    const texture = new THREE.CanvasTexture(canvas);
+    const panel = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.8, 0.4),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true })
+    );
+    // Up and to the side, so it never blocks the view of the arm.
+    panel.position.set(-0.7, 1.9, -1.4);
+    panel.lookAt(0, 1.6, 0);
+    scene.add(panel);
+
+    let latest = null;
+    let flash = null; // { color, until }
+
+    function drawPanel() {
+      const now = performance.now();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = flash && now < flash.until ? flash.color : "rgba(17,17,17,0.8)";
+      ctx.beginPath();
+      ctx.roundRect(0, 0, canvas.width, canvas.height, 32);
+      ctx.fill();
+      ctx.fillStyle = "#eee";
+      if (!latest) {
+        ctx.font = "48px system-ui";
+        ctx.fillText("Waiting for hub…", 48, 120);
+      } else {
+        const s = latest.score, r = latest.round;
+        ctx.font = "bold 120px system-ui";
+        ctx.fillText(`${s.hits}`, 48, 150);
+        ctx.font = "40px system-ui";
+        ctx.fillText(`hits   ${s.misses} misses   streak ${s.combo_streak ?? 0}`, 48, 220);
+        ctx.fillText(`avg reaction ${s.avg_reaction_ms ?? "–"} ms`, 48, 280);
+        ctx.fillText(`round ${r.number} · ${r.status} · ${r.time_left_s}s`, 48, 340);
+        if (latest.coach) {
+          ctx.font = "bold 44px system-ui";
+          ctx.fillText(latest.coach.combo.join(" → "), 48, 420);
+        }
+        if (latest.arm?.estop) {
+          ctx.fillStyle = "#e54";
+          ctx.font = "bold 56px system-ui";
+          ctx.fillText("E-STOP", 700, 120);
+        }
+      }
+      texture.needsUpdate = true;
+    }
+
+    function connect() {
+      const ws = new WebSocket(hubUrl);
+      ws.onopen = () => (statusEl.textContent = `connected to ${hubUrl}`);
+      ws.onclose = () => { statusEl.textContent = "hub disconnected, retrying…"; setTimeout(connect, 1000); };
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "state") latest = msg;
+        else if (msg.type === "event" && (msg.kind === "hit" || msg.kind === "miss")) {
+          flash = { color: msg.kind === "hit" ? "rgba(51,204,102,0.85)" : "rgba(229,85,68,0.85)", until: performance.now() + 250 };
+        }
+      };
+    }
+
+    // Passthrough (immersive-ar) only: the player must see the real arm at all times.
+    async function setupEnterButton() {
+      if (!navigator.xr || !(await navigator.xr.isSessionSupported("immersive-ar"))) {
+        enterBtn.textContent = "Passthrough WebXR not available (desktop preview only)";
+        return;
+      }
+      enterBtn.disabled = false;
+      enterBtn.textContent = "Enter (passthrough)";
+      enterBtn.onclick = async () => {
+        const session = await navigator.xr.requestSession("immersive-ar", { optionalFeatures: ["local-floor"] });
+        renderer.xr.setReferenceSpaceType("local-floor");
+        await renderer.xr.setSession(session);
+      };
+    }
+
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    renderer.setAnimationLoop(() => {
+      drawPanel();
+      renderer.render(scene, camera);
+    });
+    connect();
+    setupEnterButton();
+  </script>
+</body>
+</html>
