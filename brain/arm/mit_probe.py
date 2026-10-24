@@ -4,8 +4,11 @@
     python -m brain.arm.mit_probe can0 can1 --seconds 20 # track min/max while you move an arm by hand
 
 Sends only the MIT fault-status query (standard frame, data FF*6 00 FB), which never
-enables torque. Positions are printed in degrees assuming the RS00 range (+-12.57 rad);
-RS06 joints (1-3) also show the alternative +-112.5 rad decode until we confirm which is right.
+enables torque.
+
+Position scale: lerobot and maker-arm-sdk decode with +-12.57 rad (4*pi), but hand tests on
+2026-10-23 (left base 90 deg -> 171 deg, left wrist_roll 90 deg -> 184 deg) show these motors
+use +-2*pi. PMAX below is the measured value. Left arm = can0; outward base rotation is negative.
 """
 
 import argparse
@@ -17,8 +20,7 @@ import time
 from .interface import JOINT_NAMES
 
 QUERY = bytes([0xFF] * 6 + [0x00, 0xFB])
-PMAX_RS00 = 12.57
-PMAX_O6 = 112.5
+PMAX = 2 * math.pi
 
 
 def u16_to_rad(q: int, pmax: float) -> float:
@@ -75,13 +77,12 @@ def main() -> None:
                 print(f"  {mid} {name:14s} NO REPLY")
                 continue
             q = first[ch][mid]
-            deg = math.degrees(u16_to_rad(q, PMAX_RS00))
-            alt = f"  (O6 decode {math.degrees(u16_to_rad(q, PMAX_O6)):8.1f})" if mid <= 3 else ""
+            deg = math.degrees(u16_to_rad(q, PMAX))
             moved = ""
             if a.seconds:
-                span = math.degrees(u16_to_rad(hi[ch][mid], PMAX_RS00) - u16_to_rad(lo[ch][mid], PMAX_RS00))
+                span = math.degrees(u16_to_rad(hi[ch][mid], PMAX) - u16_to_rad(lo[ch][mid], PMAX))
                 moved = f"  moved {span:6.1f} deg"
-            print(f"  {mid} {name:14s} raw={q:5d} {deg:8.1f} deg{alt}{moved}")
+            print(f"  {mid} {name:14s} raw={q:5d} {deg:8.1f} deg{moved}")
 
 
 if __name__ == "__main__":
