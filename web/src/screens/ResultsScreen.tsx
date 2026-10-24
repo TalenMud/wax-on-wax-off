@@ -3,15 +3,13 @@ import type { Doc, Id } from "../../convex/_generated/dataModel";
 import { api } from "../../convex/_generated/api";
 import { DIFFICULTIES, MODES } from "../../convex/game";
 import { useState } from "react";
-import { usePinGate } from "../components/PinGate";
-import { avg, formatDate, learnServerTime, pct } from "../lib";
+import { avg, errorMessage, formatDate, learnServerTime, pct } from "../lib";
 
 export function ResultsScreen({ sessionId, onBack }: { sessionId: Id<"sessions">; onBack: () => void }) {
   const data = useQuery(api.sessions.get, { sessionId });
   const me = useQuery(api.sessions.me);
   const start = useMutation(api.sessions.start);
   const [error, setError] = useState<string | null>(null);
-  const { withPin, sheet } = usePinGate();
 
   if (data === undefined) return <div className="loading">Loading…</div>;
   if (data === null) return <div className="empty">Session not found.</div>;
@@ -25,10 +23,12 @@ export function ResultsScreen({ sessionId, onBack }: { sessionId: Id<"sessions">
 
   async function again() {
     setError(null);
-    await withPin(async (pin) => {
-      const { serverNow } = await start({ mode: s.mode, difficulty: s.difficulty, simulate: s.simulated, pin });
+    try {
+      const { serverNow } = await start({ mode: s.mode, difficulty: s.difficulty, simulate: s.simulated });
       learnServerTime(serverNow);
-    }, setError);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
   }
 
   return (
@@ -74,7 +74,6 @@ export function ResultsScreen({ sessionId, onBack }: { sessionId: Id<"sessions">
           Run it back
         </button>
       )}
-      {sheet}
     </div>
   );
 }

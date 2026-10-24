@@ -5,9 +5,8 @@ import { api } from "../../convex/_generated/api";
 import { bestKey, DIFFICULTIES, MODES, type Difficulty, type Mode } from "../../convex/game";
 import { EstopButton } from "../components/EstopButton";
 import { HeadsetLink } from "../components/HeadsetLink";
-import { usePinGate } from "../components/PinGate";
 import { useRigStatus } from "../components/RigPill";
-import { buzz, formatClock, learnServerTime, useNow } from "../lib";
+import { buzz, errorMessage, formatClock, learnServerTime, useNow } from "../lib";
 
 type Live = FunctionReturnType<typeof api.sessions.live>;
 
@@ -21,7 +20,6 @@ export function PlayScreen({ live }: { live: Live }) {
   const bests = useQuery(api.sessions.personalBests) ?? {};
   const start = useMutation(api.sessions.start);
   const resetEstop = useMutation(api.sessions.resetEstop);
-  const { withPin, sheet } = usePinGate();
 
   // No robot connected? Default to the built-in simulator so the app is always demoable.
   useEffect(() => {
@@ -35,11 +33,13 @@ export function PlayScreen({ live }: { live: Live }) {
   async function go() {
     setBusy(true);
     setError(null);
-    await withPin(async (pin) => {
-      const { serverNow } = await start({ mode, difficulty, simulate, pin: simulate ? undefined : pin });
+    try {
+      const { serverNow } = await start({ mode, difficulty, simulate });
       learnServerTime(serverNow);
       buzz(40);
-    }, setError);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
     setBusy(false);
   }
 
@@ -51,7 +51,7 @@ export function PlayScreen({ live }: { live: Live }) {
             <strong>E-STOP is latched</strong>
             <p>Check the arms and the area are clear, then reset.</p>
           </div>
-          <button className="btn btn-light" onClick={() => void withPin((pin) => resetEstop({ pin }), setError)}>
+          <button className="btn btn-light" onClick={() => void resetEstop().catch((err) => setError(errorMessage(err)))}>
             Reset
           </button>
         </div>
@@ -128,7 +128,6 @@ export function PlayScreen({ live }: { live: Live }) {
           ? "Practice run against the virtual opponent. Scores go on the practice board."
           : "Player puts the headset on. 3 s countdown, then the arms start."}
       </p>
-      {sheet}
     </div>
   );
 }

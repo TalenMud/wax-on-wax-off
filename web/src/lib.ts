@@ -55,22 +55,3 @@ export function errorMessage(err: unknown) {
 export function buzz(pattern: number | number[]) {
   navigator.vibrate?.(pattern);
 }
-
-// The rig PIN is remembered on this phone after it works once. Storage can be unavailable
-// (private mode), in which case the PIN is just asked for again.
-const PIN_KEY = "wax.rigPin";
-export function storedPin(): string | undefined {
-  try {
-    return localStorage.getItem(PIN_KEY) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
-export function savePin(pin: string | undefined) {
-  try {
-    if (pin) localStorage.setItem(PIN_KEY, pin);
-    else localStorage.removeItem(PIN_KEY);
-  } catch {
-    // ignore
-  }
-}

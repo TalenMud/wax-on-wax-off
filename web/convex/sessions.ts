@@ -3,7 +3,7 @@ import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { bestKey } from "./game";
-import { createSession, displayName, newLinkCode } from "./record";
+import { createSession, displayName, linkedPlayer, newLinkCode } from "./record";
 import { difficultyV, modeV } from "./schema";
 
 const RIG = "main";
@@ -31,13 +31,12 @@ async function rigSession(ctx: QueryCtx) {
   return (await liveSessions(ctx)).find((s) => !s.simulated) ?? null;
 }
 
-// Anyone can sign up on the public URL, so moving the real arms (or un-latching E-STOP) needs
-// the rig PIN shown at the booth. Unset RIG_PIN disables the check for local dev.
-function checkPin(pin: string | undefined) {
-  const expected = process.env.RIG_PIN;
-  if (!expected) return;
-  if (!pin) throw new ConvexError({ code: "PIN_REQUIRED", message: "Enter the rig PIN from the booth." });
-  if (pin.trim() !== expected) throw new ConvexError({ code: "PIN_WRONG", message: "Wrong rig PIN." });
+// Anyone can sign up on the public URL, so moving the real arms (or un-latching E-STOP) is only
+// for the player linked to the headset: the link code is only visible to someone at the booth.
+function requireLinked(rig: Doc<"rigs">, userId: Id<"users">, action: string) {
+  if (linkedPlayer(rig, Date.now()) !== userId) {
+    throw new ConvexError({ code: "NOT_LINKED", message: `Link the headset first to ${action}: enter the code shown in it.` });
+  }
 }
 
 export const me = query({
@@ -84,8 +83,8 @@ export const live = query({
 });
 
 export const start = mutation({
-  args: { mode: modeV, difficulty: difficultyV, simulate: v.boolean(), pin: v.optional(v.string()) },
-  handler: async (ctx, { mode, difficulty, simulate, pin }) => {
+  args: { mode: modeV, difficulty: difficultyV, simulate: v.boolean() },
+  handler: async (ctx, { mode, difficulty, simulate }) => {
     const userId = await requireUser(ctx);
     const now = Date.now();
     for (const s of await liveSessions(ctx)) {
@@ -98,9 +97,10 @@ export const start = mutation({
       }
     }
     if (!simulate) {
-      checkPin(pin);
       const rig = await ensureRig(ctx);
+      requireLinked(rig, userId, "use the real rig");
       if (rig.estop) throw new ConvexError("E-STOP is latched. Reset it before starting.");
+      await ctx.db.patch(rig._id, { playerAt: now });
     }
 
     return await createSession(ctx, { userId, mode, difficulty, simulate });
@@ -140,11 +140,11 @@ export const estop = mutation({
 });
 
 export const resetEstop = mutation({
-  args: { pin: v.optional(v.string()) },
-  handler: async (ctx, { pin }) => {
-    await requireUser(ctx);
-    checkPin(pin);
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUser(ctx);
     const rig = await ensureRig(ctx);
+    requireLinked(rig, userId, "reset E-STOP");
     await ctx.db.patch(rig._id, { estop: false });
   },
 });

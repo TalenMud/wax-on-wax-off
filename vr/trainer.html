@@ -18,7 +18,7 @@
     <h1>WAX ON WAX OFF</h1>
     <button id="enter" disabled>Checking WebXR…</button>
     <div id="status">Put the controllers down: your hands become the gloves.<br>
-      Link your phone with the code in the headset to save your rounds, or pinch your right hand to practice.</div>
+      Link your phone with the code shown in the headset, then pinch your right hand to start.</div>
   </div>
   <script type="importmap">
     { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
@@ -28,9 +28,9 @@
 
     // Passthrough boxing game. Tracked hands become gloves; a low-poly trainer stands where the
     // robot arms are and holds up one pad at a time. Sessions come from the phone app (Convex) via
-    // tools/serve_xr.py (/rig/state, /rig/event). The lobby shows a 6-character code; once a phone
-    // enters it, a right-hand pinch starts a round saved to that account (/rig/start). Unlinked, the
-    // pinch starts practice that isn't saved.
+    // tools/serve_xr.py (/rig/state, /rig/event). The lobby shows a 6-character code and waits; once a
+    // phone enters it, a right-hand pinch starts a round saved to that account (/rig/start). Only
+    // with the laptop's phone link offline does the pinch start unsaved practice.
     // Timings and scoring mirror web/convex/game.ts.
 
     const MODES = {
@@ -725,7 +725,7 @@
         game.actionAt = perfNow + 600;
         if (game.starting && perfNow - game.starting < 4000) return;
         if (rig.online && rig.player) { sfx.beep(true); requestRound(); }
-        else startPractice();
+        else if (!rig.online) startPractice();
       }
     }
     function onPinchHold(side, perfNow) {
@@ -858,16 +858,16 @@
       } else if (game.state === "lobby" && rig.online && rig.linkCode) {
         ctx.font = "600 34px system-ui";
         ctx.fillStyle = "#ddd";
-        ctx.fillText("LINK YOUR PHONE TO SAVE YOUR SCORE", W / 2, 80);
+        ctx.fillText("WAITING FOR A PLAYER", W / 2, 80);
         ctx.font = font(150);
         ctx.fillStyle = "#ffd60a";
         ctx.fillText((rig.linkCode || "······").split("").join(" "), W / 2, 230);
         ctx.font = "500 34px system-ui";
         ctx.fillStyle = "#fff";
         ctx.fillText("waxonwaxoff.ink  →  Train  →  enter this code", W / 2, 300);
-        ctx.font = font(46);
+        ctx.font = "500 34px system-ui";
         ctx.fillStyle = "#9fd8ff";
-        ctx.fillText("OR PINCH RIGHT: PRACTICE (NOT SAVED)", W / 2, 390);
+        ctx.fillText("Warm up on the pads while you wait", W / 2, 390);
         ctx.font = "500 28px system-ui";
         ctx.fillStyle = "#aaa";
         ctx.fillText("Hold a left pinch to move the trainer", W / 2, 445);
@@ -953,7 +953,7 @@
         }
         ctx.font = "500 30px system-ui";
         ctx.fillStyle = "#ddd";
-        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : "pinch right to practice";
+        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : rig.online ? "link a phone to play" : "pinch right to practice";
         ctx.fillText(game.source === "phone" ? `Saved to ${game.player || "your account"} · ${next}` : `Not saved · ${next}`, W / 2, H - 46);
         if (game.notice) { ctx.fillStyle = "#ff9f9f"; ctx.fillText(game.notice, W / 2, H - 96); }
       } else if (game.state === "estop") {
@@ -963,7 +963,7 @@
         ctx.font = "500 40px system-ui";
         ctx.fillStyle = "#fff";
         ctx.fillText("Stopped from the phone app.", W / 2, 400);
-        ctx.fillText("Reset it there to continue.", W / 2, 455);
+        ctx.fillText(rig.player ? `${rig.player} can reset it on their phone.` : `Link a phone with ${rig.linkCode || "the code"}, then reset it there.`, W / 2, 455);
       }
       panel.tex.needsUpdate = true;
     }

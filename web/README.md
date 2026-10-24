@@ -21,9 +21,10 @@ with React + Vite.
   finishes it, and strikes outside the window are rejected.
 - Only one arm presents at a time. Sides alternate in random runs (`maxRun` per difficulty).
 - No robot? The app defaults to a **simulated rig** (`convex/simulate.ts`) so it is always demoable.
-- **Rig PIN:** anyone can sign up on the public URL, so starting a session on the real arms (or
-  resetting E-STOP) needs `RIG_PIN`, which should be shown on a sign at the booth. Each phone remembers it after the first use.
-  Practice sessions and E-STOP itself never need it.
+- **Headset link:** anyone can sign up on the public URL, so starting a session on the real arms (or
+  resetting E-STOP) is only for the player linked to the headset. The headset lobby shows a 6-character code;
+  entering it on the Train tab links that account for 10 minutes after last use, and a right-hand pinch in the
+  headset then starts a round on it. Practice sessions and E-STOP itself never need a link.
 
 ## Sessions and scoring (`convex/game.ts`)
 
