@@ -2,13 +2,11 @@ import { useMutation, useQuery } from "convex/react";
 import { useState, type FormEvent } from "react";
 import { api } from "../../convex/_generated/api";
 import { LINK_TTL_MS } from "../../convex/game";
-import { buzz, useNow } from "../lib";
-
-type WithPin = (run: (pin: string | undefined) => Promise<unknown>, onError: (msg: string) => void) => Promise<unknown>;
+import { buzz, errorMessage, useNow } from "../lib";
 
 // Link the VR headset to this account with the 6-character code it shows, so rounds started
 // from the headset (right-hand pinch) are saved here.
-export function HeadsetLink({ withPin }: { withPin: WithPin }) {
+export function HeadsetLink() {
   const rig = useQuery(api.sessions.rig);
   const link = useMutation(api.sessions.linkHeadset);
   const unlink = useMutation(api.sessions.unlinkHeadset);
@@ -25,11 +23,13 @@ export function HeadsetLink({ withPin }: { withPin: WithPin }) {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    await withPin(async (pin) => {
-      await link({ code, pin });
+    try {
+      await link({ code });
       setCode("");
       buzz(40);
-    }, setError);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
     setBusy(false);
   }
 

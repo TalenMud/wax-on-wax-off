@@ -235,13 +235,12 @@ export const leaderboard = query({
   },
 });
 
-// The phone enters the code shown in the headset. Same PIN rule as starting a session: the
-// headset drives the real arms.
+// The phone enters the code shown in the headset. No rig PIN: only someone wearing the headset
+// at the booth can see the code, which is the same proof of presence.
 export const linkHeadset = mutation({
-  args: { code: v.string(), pin: v.optional(v.string()) },
-  handler: async (ctx, { code, pin }) => {
+  args: { code: v.string() },
+  handler: async (ctx, { code }) => {
     const userId = await requireUser(ctx);
-    checkPin(pin);
     const rig = await ensureRig(ctx);
     const clean = code.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!rig.linkCode || clean !== rig.linkCode) {

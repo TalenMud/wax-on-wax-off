@@ -57,7 +57,7 @@ export function PlayScreen({ live }: { live: Live }) {
         </div>
       )}
       {busyElsewhere && <BusyBanner live={live} />}
-      {rig.online && <HeadsetLink withPin={withPin} />}
+      {rig.online && <HeadsetLink />}
 
       <section>
         <h2 className="section-title">Session</h2>
