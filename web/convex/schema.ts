@@ -52,5 +52,11 @@ export default defineSchema({
     name: v.string(),
     lastSeenAt: v.number(),
     estop: v.boolean(),
+    // The headset shows linkCode; a signed-in phone enters it to become the headset's player,
+    // so rounds started from the headset are saved to that account.
+    linkCode: v.optional(v.string()),
+    linkCodeAt: v.optional(v.number()),
+    playerId: v.optional(v.id("users")),
+    playerAt: v.optional(v.number()),
   }).index("by_name", ["name"]),
 });

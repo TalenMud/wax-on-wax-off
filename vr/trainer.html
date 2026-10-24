@@ -18,7 +18,7 @@
     <h1>WAX ON WAX OFF</h1>
     <button id="enter" disabled>Checking WebXR…</button>
     <div id="status">Put the controllers down: your hands become the gloves.<br>
-      Start a session on the phone app, or pinch your right hand in the headset to practice.</div>
+      Link your phone with the code in the headset to save your rounds, or pinch your right hand to practice.</div>
   </div>
   <script type="importmap">
     { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
@@ -28,7 +28,9 @@
 
     // Passthrough boxing game. Tracked hands become gloves; a low-poly trainer stands where the
     // robot arms are and holds up one pad at a time. Sessions come from the phone app (Convex) via
-    // tools/serve_xr.py (/rig/state, /rig/event); without one, a right-hand pinch starts practice.
+    // tools/serve_xr.py (/rig/state, /rig/event). The lobby shows a 6-character code; once a phone
+    // enters it, a right-hand pinch starts a round saved to that account (/rig/start). Unlinked, the
+    // pinch starts practice that isn't saved.
     // Timings and scoring mirror web/convex/game.ts.
 
     const MODES = {
@@ -545,7 +547,7 @@
     }
 
     // ---------------------------------------------------------------- phone app link (tools/serve_xr.py)
-    const rig = { reachable: false, online: false, estop: false, session: null, error: "connecting", offset: 0 };
+    const rig = { reachable: false, online: false, estop: false, session: null, error: "connecting", offset: 0, linkCode: null, player: null };
     async function pollRig() {
       const t0 = Date.now();
       try {
@@ -553,7 +555,7 @@
         const j = await r.json();
         const t1 = Date.now();
         if (t1 - t0 < 300) rig.offset = j.now - (t0 + t1) / 2;   // laptop clock minus headset clock
-        Object.assign(rig, { reachable: true, online: j.online, estop: j.estop, session: j.session, error: j.error });
+        Object.assign(rig, { reachable: true, online: j.online, estop: j.estop, session: j.session, error: j.error, linkCode: j.linkCode, player: j.player });
       } catch {
         Object.assign(rig, { reachable: false, online: false, session: null, error: "laptop server unreachable" });
       }
@@ -574,9 +576,29 @@
       }).catch(() => {});
     }
 
+    // Ask the server for a round on the linked player's account. The round itself arrives through
+    // /rig/state like any phone session.
+    async function requestRound() {
+      game.starting = performance.now();
+      game.notice = "";
+      try {
+        const r = await fetch("/rig/start", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode: "standard", difficulty: "medium" }),
+        });
+        const j = await r.json();
+        if (!j.ok) { game.starting = 0; game.notice = `Couldn't start: ${j.error}`; sfx.miss(); }
+      } catch {
+        game.starting = 0;
+        game.notice = "Couldn't reach the laptop server";
+        sfx.miss();
+      }
+    }
+
     // ---------------------------------------------------------------- game state
     const game = {
-      state: "setup", source: null, session: null, played: new Set(), reason: "",
+      state: "setup", source: null, session: null, played: new Set(), reason: "", starting: 0, notice: "", player: null,
       score: 0, hits: 0, misses: 0, streak: 0, bestStreak: 0, reactionSum: 0,
       sides: null, active: null, nextAt: 0, arm: "left", run: 0, lastCount: null, missingSince: 0, actionAt: 0,
     };
@@ -599,6 +621,9 @@
         end: s.endsAt - (source === "phone" ? rig.offset : 0),
       };
       if (source === "phone") game.played.add(s.id);
+      game.player = source === "phone" ? rig.player : null;
+      game.starting = 0;
+      game.notice = "";
       game.arm = Math.random() < 0.5 ? "left" : "right";
       game.run = 0;
       game.state = "countdown";
@@ -698,7 +723,9 @@
         sfx.beep(true);
       } else if ((game.state === "lobby" || game.state === "results") && side === "right") {
         game.actionAt = perfNow + 600;
-        startPractice();
+        if (game.starting && perfNow - game.starting < 4000) return;
+        if (rig.online && rig.player) { sfx.beep(true); requestRound(); }
+        else startPractice();
       }
     }
     function onPinchHold(side, perfNow) {
@@ -788,6 +815,12 @@
       ctx.textAlign = "center";
       ctx.fillStyle = "#fff";
 
+      const noticeLine = () => {
+        if (!game.notice) return;
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = "#ff9f9f";
+        ctx.fillText(game.notice, W / 2, H - 96);
+      };
       const linkLine = () => {
         ctx.font = "600 30px system-ui";
         ctx.fillStyle = rig.online ? "#7dffb0" : "#ff9f9f";
@@ -805,12 +838,47 @@
         ctx.fillStyle = "#ffd60a";
         ctx.fillText("PINCH RIGHT HAND TO LOCK", W / 2, 430);
         linkLine();
+      } else if (game.state === "lobby" && rig.online && rig.player) {
+        ctx.font = "600 34px system-ui";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("PLAYING AS", W / 2, 80);
+        ctx.font = font(96);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(rig.player.toUpperCase().slice(0, 18), W / 2, 180);
+        ctx.font = font(60);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fillText(game.starting ? "STARTING…" : "PINCH RIGHT TO START", W / 2, 300);
+        ctx.font = "500 32px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText("60 s round · scores save to your account", W / 2, 360);
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(`Next player? Enter ${rig.linkCode || "the code"} in the phone app`, W / 2, 425);
+        noticeLine();
+        linkLine();
+      } else if (game.state === "lobby" && rig.online) {
+        ctx.font = "600 34px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText("LINK YOUR PHONE TO SAVE YOUR SCORE", W / 2, 80);
+        ctx.font = font(150);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fillText((rig.linkCode || "······").split("").join(" "), W / 2, 230);
+        ctx.font = "500 34px system-ui";
+        ctx.fillStyle = "#fff";
+        ctx.fillText("waxonwaxoff.ink  →  Train  →  enter this code", W / 2, 300);
+        ctx.font = font(46);
+        ctx.fillStyle = "#9fd8ff";
+        ctx.fillText("OR PINCH RIGHT: PRACTICE (NOT SAVED)", W / 2, 390);
+        ctx.font = "500 28px system-ui";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("Hold a left pinch to move the trainer", W / 2, 445);
+        noticeLine();
+        linkLine();
       } else if (game.state === "lobby") {
         ctx.font = font(104);
         ctx.fillText("WAX ON WAX OFF", W / 2, 140);
         ctx.font = "500 38px system-ui";
         ctx.fillStyle = "#ddd";
-        ctx.fillText(rig.online ? "Start a session on the phone app" : "Warm up: hit the pads!", W / 2, 240);
+        ctx.fillText("Warm up: hit the pads!", W / 2, 240);
         ctx.font = font(52);
         ctx.fillStyle = "#ffd60a";
         ctx.fillText("PINCH RIGHT: 60 s PRACTICE", W / 2, 350);
@@ -885,7 +953,9 @@
         }
         ctx.font = "500 30px system-ui";
         ctx.fillStyle = "#ddd";
-        ctx.fillText(game.source === "phone" ? "Saved to your account · pinch right to practice" : "Pinch right to go again", W / 2, H - 46);
+        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : "pinch right to practice";
+        ctx.fillText(game.source === "phone" ? `Saved to ${game.player || "your account"} · ${next}` : `Not saved · ${next}`, W / 2, H - 46);
+        if (game.notice) { ctx.fillStyle = "#ff9f9f"; ctx.fillText(game.notice, W / 2, H - 96); }
       } else if (game.state === "estop") {
         ctx.font = font(170);
         ctx.fillStyle = "#ff3344";

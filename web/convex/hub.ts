@@ -3,8 +3,8 @@
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import { DIFFICULTIES } from "./game";
-import { recordStrike, setPresented } from "./record";
-import { armV } from "./schema";
+import { createSession, displayName, LINK_CODE_TTL_MS, linkedPlayer, newLinkCode, recordStrike, setPresented } from "./record";
+import { armV, difficultyV, modeV } from "./schema";
 
 const HEARTBEAT_WRITE_MS = 2000;
 
@@ -19,6 +19,12 @@ export const poll = internalMutation({
     } else if (now - rig.lastSeenAt > HEARTBEAT_WRITE_MS) {
       await ctx.db.patch(rig._id, { lastSeenAt: now });
     }
+    if (!rig.linkCode || now - (rig.linkCodeAt ?? 0) > LINK_CODE_TTL_MS) {
+      const linkCode = newLinkCode();
+      await ctx.db.patch(rig._id, { linkCode, linkCodeAt: now });
+      rig = { ...rig, linkCode, linkCodeAt: now };
+    }
+    const playerId = linkedPlayer(rig, now);
 
     const live = await ctx.db.query("sessions").withIndex("by_status", (q) => q.eq("status", "live")).collect();
     const s = live.find((x) => !x.simulated);
@@ -34,7 +40,13 @@ export const poll = internalMutation({
             ...DIFFICULTIES[s.difficulty],
           }
         : null;
-    return { serverNow: now, estop: rig.estop, session };
+    return {
+      serverNow: now,
+      estop: rig.estop,
+      session,
+      linkCode: rig.linkCode,
+      player: playerId ? await displayName(ctx, playerId) : null,
+    };
   },
 });
 
@@ -54,5 +66,27 @@ export const event = internalMutation({
       return { accepted: true };
     }
     return { accepted: await recordStrike(ctx, s, { kind, arm, reactionMs }) };
+  },
+});
+
+// The headset starts a round for whoever linked it from their phone.
+export const start = internalMutation({
+  args: { mode: modeV, difficulty: difficultyV },
+  handler: async (ctx, { mode, difficulty }) => {
+    const now = Date.now();
+    const rig = await ctx.db.query("rigs").withIndex("by_name", (q) => q.eq("name", "main")).unique();
+    if (!rig) return { ok: false, error: "rig not set up" };
+    if (rig.estop) return { ok: false, error: "E-STOP is latched" };
+    const userId = linkedPlayer(rig, now);
+    if (!userId) return { ok: false, error: "no player linked" };
+    const live = await ctx.db.query("sessions").withIndex("by_status", (q) => q.eq("status", "live")).collect();
+    for (const s of live) {
+      if (s.simulated) continue;
+      if (s.endsAt + 2000 >= now) return { ok: false, error: "the rig is busy" };
+      await ctx.db.patch(s._id, { status: "finished", endedAt: s.endsAt, activeArm: undefined });
+    }
+    await ctx.db.patch(rig._id, { playerAt: now });
+    const { sessionId } = await createSession(ctx, { userId, mode, difficulty, simulate: false });
+    return { ok: true, sessionId };
   },
 });

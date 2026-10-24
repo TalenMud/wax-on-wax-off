@@ -1,6 +1,7 @@
-import type { Doc } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
-import { pointsFor, type Arm } from "./game";
+import { internal } from "./_generated/api";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { COUNTDOWN_MS, LINK_TTL_MS, MODES, pointsFor, type Arm, type Difficulty, type Mode } from "./game";
 
 // Late events are accepted for a short grace period so a punch landing on the buzzer still counts.
 const GRACE_MS = 500;
@@ -54,4 +55,63 @@ export async function recordStrike(
     activeSince: undefined,
   });
   return true;
+}
+
+const emptySide = { hits: 0, misses: 0, reactionSumMs: 0 };
+
+export async function createSession(
+  ctx: MutationCtx,
+  a: { userId: Id<"users">; mode: Mode; difficulty: Difficulty; simulate: boolean },
+): Promise<{ sessionId: Id<"sessions">; serverNow: number }> {
+  const now = Date.now();
+  const durationS = MODES[a.mode].durationS;
+  const startsAt = now + COUNTDOWN_MS;
+  const endsAt = startsAt + durationS * 1000;
+  const sessionId = await ctx.db.insert("sessions", {
+    userId: a.userId,
+    mode: a.mode,
+    difficulty: a.difficulty,
+    durationS,
+    status: "live",
+    simulated: a.simulate,
+    createdAt: now,
+    startsAt,
+    endsAt,
+    hits: 0,
+    misses: 0,
+    score: 0,
+    streak: 0,
+    bestStreak: 0,
+    reactionSumMs: 0,
+    left: emptySide,
+    right: emptySide,
+  });
+  await ctx.scheduler.runAt(endsAt, internal.sessions.finish, { sessionId });
+  if (a.simulate) {
+    await ctx.scheduler.runAt(startsAt, internal.simulate.present, {
+      sessionId,
+      arm: Math.random() < 0.5 ? "left" : "right",
+      run: 1,
+    });
+  }
+  return { sessionId, serverNow: now };
+}
+
+// Headset link codes: 6 characters without look-alikes (no 0/O, 1/I/L), fresh every 15 minutes.
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+export const LINK_CODE_TTL_MS = 15 * 60_000;
+
+export function newLinkCode(): string {
+  let code = "";
+  for (let i = 0; i < 6; i++) code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  return code;
+}
+
+export function linkedPlayer(rig: Doc<"rigs">, now: number): Id<"users"> | null {
+  return rig.playerId && now - (rig.playerAt ?? 0) < LINK_TTL_MS ? rig.playerId : null;
+}
+
+export async function displayName(ctx: QueryCtx, userId: Id<"users">) {
+  const user = await ctx.db.get(userId);
+  return user?.name || user?.email?.split("@")[0] || "Player";
 }

@@ -1,13 +1,12 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { ConvexError, v } from "convex/values";
-import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
-import { bestKey, COUNTDOWN_MS, MODES } from "./game";
+import { bestKey } from "./game";
+import { createSession, displayName, newLinkCode } from "./record";
 import { difficultyV, modeV } from "./schema";
 
 const RIG = "main";
-const emptySide = { hits: 0, misses: 0, reactionSumMs: 0 };
 
 async function requireUser(ctx: QueryCtx | MutationCtx): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
@@ -41,11 +40,6 @@ function checkPin(pin: string | undefined) {
   if (pin.trim() !== expected) throw new ConvexError({ code: "PIN_WRONG", message: "Wrong rig PIN." });
 }
 
-async function displayName(ctx: QueryCtx, userId: Id<"users">) {
-  const user = await ctx.db.get(userId);
-  return user?.name || user?.email?.split("@")[0] || "Player";
-}
-
 export const me = query({
   args: {},
   handler: async (ctx) => {
@@ -59,8 +53,16 @@ export const me = query({
 export const rig = query({
   args: {},
   handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
     const rig = await ctx.db.query("rigs").withIndex("by_name", (q) => q.eq("name", RIG)).unique();
-    return { lastSeenAt: rig?.lastSeenAt ?? 0, estop: rig?.estop ?? false };
+    // The phone checks linkedAt against LINK_TTL_MS itself so this query doesn't depend on the clock.
+    const playerId = rig?.playerId ?? null;
+    return {
+      lastSeenAt: rig?.lastSeenAt ?? 0,
+      estop: rig?.estop ?? false,
+      linkedToMe: !!userId && playerId === userId,
+      linkedAt: rig?.playerAt ?? 0,
+    };
   },
 });
 
@@ -101,37 +103,7 @@ export const start = mutation({
       if (rig.estop) throw new ConvexError("E-STOP is latched. Reset it before starting.");
     }
 
-    const durationS = MODES[mode].durationS;
-    const startsAt = now + COUNTDOWN_MS;
-    const endsAt = startsAt + durationS * 1000;
-    const sessionId = await ctx.db.insert("sessions", {
-      userId,
-      mode,
-      difficulty,
-      durationS,
-      status: "live",
-      simulated: simulate,
-      createdAt: now,
-      startsAt,
-      endsAt,
-      hits: 0,
-      misses: 0,
-      score: 0,
-      streak: 0,
-      bestStreak: 0,
-      reactionSumMs: 0,
-      left: emptySide,
-      right: emptySide,
-    });
-    await ctx.scheduler.runAt(endsAt, internal.sessions.finish, { sessionId });
-    if (simulate) {
-      await ctx.scheduler.runAt(startsAt, internal.simulate.present, {
-        sessionId,
-        arm: Math.random() < 0.5 ? "left" : "right",
-        run: 1,
-      });
-    }
-    return { sessionId, serverNow: now };
+    return await createSession(ctx, { userId, mode, difficulty, simulate });
   },
 });
 
@@ -260,5 +232,31 @@ export const leaderboard = query({
       if (rows.length === 10) break;
     }
     return rows;
+  },
+});
+
+// The phone enters the code shown in the headset. Same PIN rule as starting a session: the
+// headset drives the real arms.
+export const linkHeadset = mutation({
+  args: { code: v.string(), pin: v.optional(v.string()) },
+  handler: async (ctx, { code, pin }) => {
+    const userId = await requireUser(ctx);
+    checkPin(pin);
+    const rig = await ensureRig(ctx);
+    const clean = code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!rig.linkCode || clean !== rig.linkCode) {
+      throw new ConvexError({ code: "BAD_CODE", message: "That code doesn't match the headset. Check it and try again." });
+    }
+    const now = Date.now();
+    await ctx.db.patch(rig._id, { playerId: userId, playerAt: now, linkCode: newLinkCode(), linkCodeAt: now });
+  },
+});
+
+export const unlinkHeadset = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUser(ctx);
+    const rig = await ensureRig(ctx);
+    if (rig.playerId === userId) await ctx.db.patch(rig._id, { playerId: undefined, playerAt: undefined });
   },
 });

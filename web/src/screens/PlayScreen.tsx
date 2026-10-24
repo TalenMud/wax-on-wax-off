@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { bestKey, DIFFICULTIES, MODES, type Difficulty, type Mode } from "../../convex/game";
 import { EstopButton } from "../components/EstopButton";
+import { HeadsetLink } from "../components/HeadsetLink";
 import { usePinGate } from "../components/PinGate";
 import { useRigStatus } from "../components/RigPill";
 import { buzz, formatClock, learnServerTime, useNow } from "../lib";
@@ -56,6 +57,7 @@ export function PlayScreen({ live }: { live: Live }) {
         </div>
       )}
       {busyElsewhere && <BusyBanner live={live} />}
+      {rig.online && <HeadsetLink withPin={withPin} />}
 
       <section>
         <h2 className="section-title">Session</h2>

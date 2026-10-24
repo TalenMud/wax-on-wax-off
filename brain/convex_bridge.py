@@ -38,6 +38,8 @@ class ConvexBridge:
         self.secret = secret
         self.timeout_s = timeout_s
         self.skew_s = 0.0  # server clock minus local clock
+        self.link_code: str | None = None  # shown in the headset; a phone enters it to link
+        self.player: str | None = None  # name of the account the headset is linked to
 
     def _request(self, path: str, body: dict | None = None) -> dict:
         req = urllib.request.Request(
@@ -54,6 +56,8 @@ class ConvexBridge:
         sent = time.time()
         data = self._request("/hub/poll")
         self.skew_s = data["serverNow"] / 1000 - (sent + time.time()) / 2
+        self.link_code = data.get("linkCode")
+        self.player = data.get("player")
         s = data["session"]
         if s is None:
             return data["estop"], None
@@ -68,6 +72,10 @@ class ConvexBridge:
             max_run=s["maxRun"],
             gap_ms=s["gapMs"],
         )
+
+    def start(self, mode: str, difficulty: str) -> dict:
+        """Start a round for the linked player. Returns {ok, sessionId} or {ok: False, error}."""
+        return self._request("/hub/start", {"mode": mode, "difficulty": difficulty})
 
     def present(self, session_id: str, arm: str) -> bool:
         return self._request("/hub/event", {"sessionId": session_id, "kind": "present", "arm": arm})["accepted"]

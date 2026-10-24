@@ -46,4 +46,18 @@ http.route({
   }),
 });
 
+http.route({
+  path: "/hub/start",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    const denied = authorized(req);
+    if (denied) return denied;
+    const body = await req.json();
+    if (!["sprint", "standard", "round"].includes(body.mode) || !["easy", "medium", "hard"].includes(body.difficulty)) {
+      return new Response("mode must be sprint|standard|round and difficulty easy|medium|hard", { status: 400 });
+    }
+    return Response.json(await ctx.runMutation(internal.hub.start, { mode: body.mode, difficulty: body.difficulty }));
+  }),
+});
+
 export default http;

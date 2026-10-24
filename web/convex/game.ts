@@ -28,6 +28,10 @@ export const DIFFICULTIES: Record<
 
 export const COUNTDOWN_MS = 3000;
 
+// A headset link lasts this long after it was made or last used, so the next visitor
+// doesn't play on someone else's account.
+export const LINK_TTL_MS = 10 * 60_000;
+
 export function pointsFor(reactionMs: number, streakBeforeHit: number): number {
   const base = reactionMs < 400 ? 100 : reactionMs < 600 ? 75 : 50;
   return base + Math.min(streakBeforeHit, 10) * 10;

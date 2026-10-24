@@ -6,8 +6,9 @@
 With HUB_SECRET set, or saved in ~/.config/wax-on-wax-off/hub_secret (and optionally CONVEX_SITE_URL), the server polls the phone app's Convex
 backend through brain/convex_bridge.py and the headset plays the rig's part:
 
-    GET  /rig/state   {online, error, estop, now, session}  times are this laptop's epoch ms
+    GET  /rig/state   {online, error, estop, now, session, linkCode, player}  times are this laptop's epoch ms
     POST /rig/event   {sessionId, kind: present|hit|miss, arm: left|right, reactionMs?} -> {accepted}
+    POST /rig/start   {mode, difficulty} -> {ok, sessionId} or {ok: false, error}  for the linked player
 
 HUB_SECRET stays on this laptop; the headset only ever talks to this server.
 """
@@ -39,7 +40,7 @@ class Rig:
     def __init__(self, bridge: ConvexBridge | None) -> None:
         self.bridge = bridge
         self.lock = threading.Lock()
-        self.state = {"online": False, "error": "HUB_SECRET not set" if bridge is None else "connecting", "estop": False, "session": None}
+        self.state = {"online": False, "error": "HUB_SECRET not set" if bridge is None else "connecting", "estop": False, "session": None, "linkCode": None, "player": None}
 
     def run(self) -> None:
         while True:
@@ -58,12 +59,13 @@ class Rig:
                         "maxRun": s.max_run,
                         "gapMs": s.gap_ms,
                     }
-                new = {"online": True, "error": None, "estop": estop, "session": session}
+                new = {"online": True, "error": None, "estop": estop, "session": session,
+                       "linkCode": self.bridge.link_code, "player": self.bridge.player}
             except Exception as e:  # network blips must not kill the poller
-                new = {"online": False, "error": str(e), "estop": self.state["estop"], "session": None}
+                new = {**self.state, "online": False, "error": str(e), "session": None}
             with self.lock:
-                if new["session"] != self.state["session"] or new["online"] != self.state["online"]:
-                    print(f"rig: online={new['online']} estop={new['estop']} session={new['session'] and new['session']['id']} {new['error'] or ''}")
+                if any(new[k] != self.state[k] for k in ("session", "online", "player")):
+                    print(f"rig: online={new['online']} estop={new['estop']} player={new['player']} session={new['session'] and new['session']['id']} {new['error'] or ''}")
                 self.state = new
             time.sleep(POLL_S)
 
@@ -82,6 +84,11 @@ class Rig:
         if kind == "miss":
             return self.bridge.miss(sid, arm)
         raise ValueError(f"unknown kind {kind!r}")
+
+    def start(self, body: dict) -> dict:
+        if self.bridge is None:
+            return {"ok": False, "error": "HUB_SECRET not set"}
+        return self.bridge.start(body.get("mode", "standard"), body.get("difficulty", "medium"))
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -131,6 +138,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             print(f"rig event {body['kind']} {body['arm']} {body.get('reactionMs', '')} -> {accepted}")
             self._json(200, {"accepted": accepted})
+        elif self.path == "/rig/start":
+            body = self._body()
+            if body is None:
+                self.send_error(400)
+                return
+            try:
+                result = self.rig.start(body)
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            print(f"rig start {body} -> {result}")
+            self._json(200, result)
         else:
             self.send_error(404)
 
