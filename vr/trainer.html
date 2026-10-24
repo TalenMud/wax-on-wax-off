@@ -855,7 +855,7 @@
         ctx.fillText(`Next player? Enter ${rig.linkCode || "the code"} in the phone app`, W / 2, 425);
         noticeLine();
         linkLine();
-      } else if (game.state === "lobby" && rig.online) {
+      } else if (game.state === "lobby" && rig.online && rig.linkCode) {
         ctx.font = "600 34px system-ui";
         ctx.fillStyle = "#ddd";
         ctx.fillText("LINK YOUR PHONE TO SAVE YOUR SCORE", W / 2, 80);
