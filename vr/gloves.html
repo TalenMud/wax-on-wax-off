@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Glove Tracking Test</title>
+  <style>
+    body { margin: 0; background: #111; color: #eee; font: 16px system-ui, sans-serif; }
+    #ui { position: absolute; inset: 16px auto auto 16px; max-width: 560px; }
+    button { font-size: 18px; padding: 12px 18px; border: 0; border-radius: 8px; background: #3c6; color: #111; }
+    button:disabled { background: #444; color: #999; }
+    #status { margin-top: 8px; color: #999; font-size: 14px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="enter" disabled>Checking WebXR…</button>
+    <div id="status">Put the controllers down so the headset tracks your hands.<br>
+      In the headset: punch the yellow pad. Pinch and hold your LEFT thumb + index for 1 s to reset stats and re-place the pad.</div>
+  </div>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+
+    // Hand-tracking reliability test for boxing: low-poly gloves on tracked hands, one pad,
+    // per-hand dropout stats, and a swept-sphere hit test. Stats are POSTed to /log every 2 s
+    // when served by tools/serve_xr.py, so the laptop can read the results.
+
+    const GLOVE_RADIUS = 0.06;
+    const PAD_RADIUS = 0.1;
+    const HIT_MIN_SPEED = 1.0;      // m/s toward the pad
+    const HIT_DEBOUNCE_MS = 300;
+    const PUNCH_SPEED = 2.5;        // wrist speed peak that counts as a punch
+    const FAST_SPEED = 2.0;         // a dropout right after this speed counts as "lost while fast"
+    const GHOST_MS = 150;           // extrapolate a lost hand this long
+
+    const statusEl = document.getElementById("status");
+    const enterBtn = document.getElementById("enter");
+
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    } catch (err) {
+      enterBtn.textContent = "WebGL not available in this browser";
+      throw err;
+    }
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.xr.enabled = true;
+    renderer.xr.setReferenceSpaceType("local-floor");
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 50);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+    sun.position.set(1, 3, 2);
+    scene.add(sun);
+
+    // ---- Low-poly glove: fist + cuff (+ thumb that follows the real thumb) ----
+    function makeGlove(color) {
+      const group = new THREE.Group();
+      const leather = new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.55, transparent: true });
+      const cuffMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, flatShading: true, roughness: 0.7, transparent: true });
+      const fist = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1), leather);
+      fist.scale.set(0.055, 0.047, 0.068);
+      fist.position.set(0, 0, -0.085);
+      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.046, 0.05, 0.075, 8), cuffMat);
+      cuff.rotation.x = Math.PI / 2;
+      cuff.position.set(0, 0, 0.0);
+      group.add(fist, cuff);
+      const thumb = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), leather);
+      thumb.scale.set(0.022, 0.022, 0.03);
+      group.visible = false;
+      thumb.visible = false;
+      scene.add(group, thumb);
+      return { group, thumb, materials: [leather, cuffMat] };
+    }
+
+    // ---- Pad ----
+    const padMat = new THREE.MeshStandardMaterial({ color: 0xffcc22, flatShading: true, roughness: 0.6 });
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(PAD_RADIUS, PAD_RADIUS, 0.05, 10), padMat);
+    pad.rotation.x = Math.PI / 2;
+    const padHolder = new THREE.Group();
+    padHolder.add(pad);
+    padHolder.visible = false;
+    scene.add(padHolder);
+    let padFlashUntil = 0;
+
+    // ---- HUD panel (canvas texture), placed up and to the left of the pad ----
+    const canvas = document.createElement("canvas");
+    canvas.width = 1024;
+    canvas.height = 640;
+    const ctx = canvas.getContext("2d");
+    const hudTex = new THREE.CanvasTexture(canvas);
+    const hud = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.5), new THREE.MeshBasicMaterial({ map: hudTex, transparent: true }));
+    hud.visible = false;
+    scene.add(hud);
+
+    // ---- Per-hand state ----
+    const JOINTS = ["wrist", "middle-finger-phalanx-proximal", "index-finger-phalanx-proximal",
+                    "pinky-finger-phalanx-proximal", "thumb-phalanx-distal", "thumb-tip", "index-finger-tip"];
+    const hands = {};
+    for (const i of [0, 1]) {
+      const hand = renderer.xr.getHand(i);
+      scene.add(hand);
+      hand.addEventListener("connected", (e) => {
+        const side = e.data.handedness;
+        hand.userData.side = side;
+        if (!hands[side]) hands[side] = newHandState(side);
+        hands[side].obj = hand;
+      });
+      hand.addEventListener("disconnected", () => {
+        const side = hand.userData.side;
+        if (side && hands[side]) hands[side].obj = null;
+      });
+    }
+
+    function newHandState(side) {
+      return {
+        side, obj: null, glove: makeGlove(side === "left" ? 0x2a6bd8 : 0xd8302a),
+        wasTracked: false, lastPos: null, lastT: 0, vel: new THREE.Vector3(), speed: 0,
+        fistPrev: null, lostSince: 0, ghostFrom: null,
+        stats: freshStats(),
+        punchArmed: true, lastHitT: 0, pinchSince: 0,
+      };
+    }
+    function freshStats() {
+      return { frames: 0, tracked: 0, dropouts: 0, dropsWhileFast: 0, dropsRecoveredInGhost: 0,
+               longestDropMs: 0, totalDropMs: 0, punches: 0, hits: 0, peakSpeed: 0, hitSpeeds: [] };
+    }
+
+    const v = (x) => new THREE.Vector3().copy(x);
+    function jointWorld(hand, name) {
+      const j = hand && hand.joints && hand.joints[name];
+      return j && j.visible ? j.getWorldPosition(new THREE.Vector3()) : null;
+    }
+
+    // Orient the glove from the wrist, middle and index/pinky knuckles.
+    const basis = new THREE.Matrix4();
+    function poseGlove(h, wrist, middle, index, pinky) {
+      const fwd = v(middle).sub(wrist).normalize();
+      const side = v(index).sub(pinky);
+      side.sub(v(fwd).multiplyScalar(side.dot(fwd))).normalize();
+      const up = new THREE.Vector3().crossVectors(side, fwd).normalize();
+      const back = v(fwd).negate();
+      basis.makeBasis(side, up, back);
+      h.glove.group.quaternion.setFromRotationMatrix(basis);
+      h.glove.group.position.copy(wrist);
+    }
+
+    function setGloveOpacity(h, a) {
+      for (const m of h.glove.materials) m.opacity = a;
+    }
+
+    // ---- Pad placement / reset ----
+    let needPlace = true;
+    function placePad() {
+      const xrCam = renderer.xr.getCamera();
+      const head = xrCam.getWorldPosition(new THREE.Vector3());
+      const dir = xrCam.getWorldDirection(new THREE.Vector3());
+      dir.y = 0;
+      dir.normalize();
+      padHolder.position.copy(head).addScaledVector(dir, 0.5);
+      padHolder.position.y = head.y - 0.2;
+      padHolder.lookAt(head.x, padHolder.position.y, head.z);
+      padHolder.visible = true;
+      const left = new THREE.Vector3(dir.z, 0, -dir.x);
+      hud.position.copy(head).addScaledVector(dir, 1.2).addScaledVector(left, 0.6);
+      hud.position.y = head.y + 0.25;
+      hud.lookAt(head);
+      hud.visible = true;
+      needPlace = false;
+    }
+    function resetAll() {
+      for (const h of Object.values(hands)) h.stats = freshStats();
+      sessionStart = performance.now();
+      needPlace = true;
+    }
+
+    // Segment p0->p1 vs sphere (center c, radius r): does it pass within r?
+    function segmentHitsSphere(p0, p1, c, r) {
+      const d = v(p1).sub(p0);
+      const len2 = d.lengthSq();
+      let t = len2 > 0 ? v(c).sub(p0).dot(d) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      return v(p0).addScaledVector(d, t).distanceTo(c) <= r;
+    }
+
+    // ---- Per-frame update ----
+    let sessionStart = performance.now();
+    const padCenter = new THREE.Vector3();
+    const padNormal = new THREE.Vector3();
+    function updateHand(h, now) {
+      const s = h.stats;
+      s.frames++;
+      const wrist = jointWorld(h.obj, "wrist");
+      const middle = jointWorld(h.obj, "middle-finger-phalanx-proximal");
+      const index = jointWorld(h.obj, "index-finger-phalanx-proximal");
+      const pinky = jointWorld(h.obj, "pinky-finger-phalanx-proximal");
+      const tracked = !!(wrist && middle && index && pinky);
+
+      if (tracked) {
+        s.tracked++;
+        if (!h.wasTracked && h.lostSince) {
+          const dropMs = now - h.lostSince;
+          s.totalDropMs += dropMs;
+          s.longestDropMs = Math.max(s.longestDropMs, dropMs);
+          if (dropMs <= GHOST_MS) s.dropsRecoveredInGhost++;
+        }
+        const dt = (now - h.lastT) / 1000;
+        if (h.lastPos && dt > 0 && dt < 0.1) {
+          const instVel = v(wrist).sub(h.lastPos).divideScalar(dt);
+          h.vel.lerp(instVel, 0.5);
+          h.speed = h.vel.length();
+          s.peakSpeed = Math.max(s.peakSpeed, h.speed);
+        }
+        h.lastPos = v(wrist);
+        h.lastT = now;
+        poseGlove(h, wrist, middle, index, pinky);
+        setGloveOpacity(h, 1);
+        h.glove.group.visible = true;
+        const thumb = jointWorld(h.obj, "thumb-phalanx-distal");
+        h.glove.thumb.visible = !!thumb;
+        if (thumb) {
+          h.glove.thumb.position.copy(thumb);
+          h.glove.thumb.quaternion.copy(h.glove.group.quaternion);
+        }
+
+        // Punch = wrist speed peak above PUNCH_SPEED (re-armed when it drops below half).
+        if (h.punchArmed && h.speed > PUNCH_SPEED) { s.punches++; h.punchArmed = false; }
+        if (h.speed < PUNCH_SPEED / 2) h.punchArmed = true;
+
+        // Left-hand pinch hold = reset.
+        if (h.side === "left") {
+          const tt = jointWorld(h.obj, "thumb-tip"), it = jointWorld(h.obj, "index-finger-tip");
+          if (tt && it && tt.distanceTo(it) < 0.015) {
+            if (!h.pinchSince) h.pinchSince = now;
+            else if (now - h.pinchSince > 1000) { h.pinchSince = 0; resetAll(); }
+          } else h.pinchSince = 0;
+        }
+      } else {
+        if (h.wasTracked) {
+          s.dropouts++;
+          h.lostSince = now;
+          if (h.speed > FAST_SPEED) s.dropsWhileFast++;
+        }
+        // Ghost: keep the glove moving along its last velocity for a short time.
+        const lostFor = now - h.lostSince;
+        if (h.lastPos && lostFor < GHOST_MS) {
+          const p = v(h.lastPos).addScaledVector(h.vel, lostFor / 1000);
+          h.glove.group.position.copy(p);
+          setGloveOpacity(h, 0.35);
+          h.glove.group.visible = true;
+        } else {
+          h.glove.group.visible = false;
+        }
+        h.glove.thumb.visible = false;
+      }
+
+      // Swept hit test on the fist centre (works for real and ghost gloves).
+      if (h.glove.group.visible && padHolder.visible) {
+        const fist = h.glove.group.localToWorld(new THREE.Vector3(0, 0, -0.085));
+        if (h.fistPrev) {
+          pad.getWorldPosition(padCenter);
+          padNormal.set(0, 0, 1).applyQuaternion(padHolder.quaternion);  // faces the player
+          const approach = -h.vel.dot(padNormal);
+          if (now - h.lastHitT > HIT_DEBOUNCE_MS && approach > HIT_MIN_SPEED &&
+              segmentHitsSphere(h.fistPrev, fist, padCenter, PAD_RADIUS + GLOVE_RADIUS)) {
+            s.hits++;
+            s.hitSpeeds.push(+approach.toFixed(2));
+            h.lastHitT = now;
+            padFlashUntil = now + 150;
+          }
+        }
+        h.fistPrev = fist;
+      } else {
+        h.fistPrev = null;
+      }
+      h.wasTracked = tracked;
+    }
+
+    function summary() {
+      const out = { t: Date.now() / 1000, secs: +((performance.now() - sessionStart) / 1000).toFixed(1), hands: {} };
+      for (const h of Object.values(hands)) {
+        const s = h.stats;
+        out.hands[h.side] = { ...s, trackedPct: s.frames ? +(100 * s.tracked / s.frames).toFixed(1) : 0,
+                              hitSpeeds: s.hitSpeeds.slice(-20), peakSpeed: +s.peakSpeed.toFixed(2),
+                              longestDropMs: Math.round(s.longestDropMs), totalDropMs: Math.round(s.totalDropMs) };
+      }
+      return out;
+    }
+
+    function drawHud() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "rgba(10,12,18,0.82)";
+      ctx.beginPath(); ctx.roundRect(0, 0, canvas.width, canvas.height, 36); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 44px system-ui";
+      ctx.fillText("Glove tracking test", 40, 70);
+      ctx.font = "34px system-ui";
+      const sm = summary();
+      let y = 140;
+      for (const side of ["left", "right"]) {
+        const s = sm.hands[side];
+        ctx.fillStyle = side === "left" ? "#7fb0ff" : "#ff8f86";
+        if (!s) { ctx.fillText(`${side}: not seen yet`, 40, y); y += 120; continue; }
+        ctx.fillText(`${side}: tracked ${s.trackedPct}%  drops ${s.dropouts} (fast ${s.dropsWhileFast})`, 40, y);
+        ctx.fillStyle = "#ddd";
+        ctx.fillText(`punches ${s.punches}  hits ${s.hits}  peak ${s.peakSpeed} m/s  longest drop ${s.longestDropMs} ms`, 40, y + 48);
+        y += 130;
+      }
+      ctx.fillStyle = "#999";
+      ctx.font = "28px system-ui";
+      ctx.fillText("Left pinch-hold 1 s = reset + re-place pad", 40, canvas.height - 40);
+      hudTex.needsUpdate = true;
+    }
+
+    // Send stats to the laptop (tools/serve_xr.py) every 2 s; ignored if not served by it.
+    setInterval(() => {
+      if (!renderer.xr.isPresenting) return;
+      fetch("/log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(summary()) })
+        .catch(() => {});
+    }, 2000);
+
+    let lastHud = 0;
+    renderer.setAnimationLoop(() => {
+      const now = performance.now();
+      if (renderer.xr.isPresenting) {
+        if (needPlace) placePad();
+        for (const h of Object.values(hands)) if (h.obj !== undefined) updateHand(h, now);
+        padMat.color.set(now < padFlashUntil ? 0x55ff77 : 0xffcc22);
+        if (now - lastHud > 200) { drawHud(); lastHud = now; }
+      }
+      renderer.render(scene, camera);
+    });
+
+    // ---- Session start (passthrough only, hand tracking requested) ----
+    async function init() {
+      if (!navigator.xr || !(await navigator.xr.isSessionSupported("immersive-ar"))) {
+        enterBtn.textContent = "Passthrough AR not supported here";
+        return;
+      }
+      enterBtn.disabled = false;
+      enterBtn.textContent = "Enter (passthrough + hands)";
+      enterBtn.onclick = async () => {
+        const session = await navigator.xr.requestSession("immersive-ar", {
+          optionalFeatures: ["local-floor", "hand-tracking"],
+        });
+        await renderer.xr.setSession(session);
+        resetAll();
+        session.addEventListener("end", () => { enterBtn.textContent = "Enter again"; });
+      };
+    }
+    init();
+  </script>
+</body>
+</html>
