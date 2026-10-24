@@ -1,0 +1,943 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wax On Wax Off</title>
+  <style>
+    body { margin: 0; background: #121012; color: #eee; font: 16px system-ui, sans-serif; overflow: hidden; }
+    #ui { position: absolute; inset: 16px auto auto 16px; max-width: 520px; z-index: 1; }
+    h1 { margin: 0 0 8px; font: 700 28px Impact, system-ui, sans-serif; letter-spacing: 1px; }
+    button { font-size: 18px; padding: 12px 18px; border: 0; border-radius: 8px; background: #ffd60a; color: #111; font-weight: 700; }
+    button:disabled { background: #444; color: #999; }
+    #status { margin-top: 8px; color: #aaa; font-size: 14px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <h1>WAX ON WAX OFF</h1>
+    <button id="enter" disabled>Checking WebXR…</button>
+    <div id="status">Put the controllers down: your hands become the gloves.<br>
+      Start a session on the phone app, or pinch your right hand in the headset to practice.</div>
+  </div>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+
+    // Passthrough boxing game. Tracked hands become gloves; a low-poly trainer stands where the
+    // robot arms are and holds up one pad at a time. Sessions come from the phone app (Convex) via
+    // tools/serve_xr.py (/rig/state, /rig/event); without one, a right-hand pinch starts practice.
+    // Timings and scoring mirror web/convex/game.ts.
+
+    const MODES = {
+      sprint: { label: "SPRINT", durationS: 30 },
+      standard: { label: "STANDARD", durationS: 60 },
+      round: { label: "FIGHT ROUND", durationS: 180 },
+    };
+    const DIFFICULTIES = {
+      easy: { label: "EASY", windowMs: 1500, maxRun: 2, gapMs: 900 },
+      medium: { label: "MEDIUM", windowMs: 1000, maxRun: 3, gapMs: 650 },
+      hard: { label: "HARD", windowMs: 700, maxRun: 4, gapMs: 450 },
+    };
+    const COUNTDOWN_MS = 3000;
+    const pointsFor = (ms, streak) => (ms < 400 ? 100 : ms < 600 ? 75 : 50) + Math.min(streak, 10) * 10;
+    const rating = (ms) => ms < 400 ? ["LIGHTNING", "#7dffb0"] : ms < 600 ? ["SHARP", "#9fd8ff"] : ms < 800 ? ["SOLID", "#ffe08a"] : ["SLOW", "#ffb38a"];
+
+    const GLOVE_R = 0.06;
+    const PAD_R = 0.11;
+    const HIT_MIN_APPROACH = 0.8;   // m/s toward the pad face
+    const HIT_DEBOUNCE_MS = 250;
+    const MAX_HAND_SPEED = 15;      // faster than this between frames is a tracking glitch
+    const GHOST_MS = 150;           // keep a lost hand moving along its last velocity this long
+    const TRAINER_DIST = 0.85;      // player's head to trainer, metres
+    const PAD_REACH = 0.5;          // player's head to the pad face
+    const PAD_SPREAD = 0.19;        // pad centre to the trainer's midline
+    const PINCH_M = 0.018;
+
+    const statusEl = document.getElementById("status");
+    const enterBtn = document.getElementById("enter");
+    const tmp = () => new THREE.Vector3();
+    const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+
+    // ---------------------------------------------------------------- renderer
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    } catch (err) {
+      enterBtn.textContent = "WebGL not available in this browser";
+      throw err;
+    }
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.xr.enabled = true;
+    renderer.xr.setReferenceSpaceType("local-floor");
+    document.body.appendChild(renderer.domElement);
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 50);
+    camera.position.set(0, 1.6, 0);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x556677, 1.7));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+    sun.position.set(1, 3, 2);
+    scene.add(sun);
+
+    // ---------------------------------------------------------------- audio (synthesised, no files)
+    let actx = null, master = null, noiseBuf = null;
+    function initAudio() {
+      if (!actx) {
+        actx = new AudioContext();
+        master = actx.createGain();
+        master.gain.value = 0.9;
+        master.connect(actx.destination);
+        noiseBuf = actx.createBuffer(1, actx.sampleRate, actx.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      }
+      if (actx.state === "suspended") actx.resume();
+    }
+    function envelope(g, t, attack, dur, peak) {
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(peak, t + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + attack + dur);
+    }
+    function osc(type, f0, f1, dur, vol, delay = 0) {
+      if (!actx) return;
+      const t = actx.currentTime + delay;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t);
+      if (f1) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      envelope(g, t, 0.005, dur, vol);
+      o.connect(g).connect(master);
+      o.start(t);
+      o.stop(t + dur + 0.05);
+    }
+    function noise(dur, vol, freq, { attack = 0.003, type = "bandpass", q = 0.8, delay = 0 } = {}) {
+      if (!actx) return;
+      const t = actx.currentTime + delay;
+      const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain();
+      src.buffer = noiseBuf;
+      src.loop = true;
+      f.type = type;
+      f.frequency.value = freq;
+      f.Q.value = q;
+      envelope(g, t, attack, dur, vol);
+      src.connect(f).connect(g).connect(master);
+      src.start(t);
+      src.stop(t + attack + dur + 0.05);
+    }
+    const sfx = {
+      hit(power) { noise(0.1, 0.5 + 0.4 * power, 700 + 1400 * power); osc("sine", 170, 50, 0.2, 0.5 + 0.4 * power); },
+      perfect() { osc("triangle", 880, 1760, 0.18, 0.12, 0.03); },
+      tap() { noise(0.05, 0.25, 500); },
+      miss() { osc("sawtooth", 200, 80, 0.35, 0.1); },
+      present() { osc("triangle", 520, 780, 0.07, 0.07); },
+      beep(go) { osc("square", go ? 1320 : 660, null, go ? 0.35 : 0.12, 0.07); },
+      bell() { for (const k of [0, 0.32]) for (const [m, v] of [[1, 0.2], [2.76, 0.08], [5.4, 0.04]]) osc("sine", 560 * m, null, 1.6 / m, v, k); },
+      streak(n) { osc("triangle", 660 * 2 ** (Math.min(n, 24) / 24), null, 0.15, 0.1); osc("triangle", 990 * 2 ** (Math.min(n, 24) / 24), null, 0.2, 0.08, 0.08); },
+      cheer() { noise(1.6, 0.22, 1400, { attack: 0.35, q: 0.4 }); noise(1.2, 0.12, 3000, { attack: 0.2, q: 0.6, delay: 0.25 }); },
+    };
+
+    // ---------------------------------------------------------------- canvas panels
+    function makePanel(wM, hM, wPx, hPx) {
+      const canvas = document.createElement("canvas");
+      canvas.width = wPx;
+      canvas.height = hPx;
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(wM, hM),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+      mesh.renderOrder = 10;
+      mesh.visible = false;
+      scene.add(mesh);
+      return { mesh, ctx: canvas.getContext("2d"), canvas, tex };
+    }
+    const panel = makePanel(1.0, 0.625, 1024, 640);
+    const DISPLAY = "900 FONT Impact, 'Arial Black', system-ui, sans-serif";
+    const font = (px) => DISPLAY.replace("FONT", `${px}px`);
+
+    // ---------------------------------------------------------------- trainer
+    const flat = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.6, ...extra });
+    const trainer = (() => {
+      const root = new THREE.Group();
+      const body = new THREE.Group();
+      root.add(body);
+      const skin = flat(0xf2c38f), shirt = flat(0x3a86ff), shorts = flat(0x1d1f33), shoe = flat(0xf5f5f5);
+
+      // Ground shadow so it sits on the real floor in passthrough.
+      const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.32, 20),
+        new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false }));
+      shadow.rotation.x = -Math.PI / 2;
+      shadow.position.y = 0.003;
+      root.add(shadow);
+
+      for (const x of [-0.09, 0.09]) {
+        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.62, 6), skin);
+        leg.position.set(x, 0.38, 0);
+        const shoeM = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.17), shoe);
+        shoeM.position.set(x, 0.035, 0.03);
+        body.add(leg, shoeM);
+      }
+      const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.16, 0.2, 8), shorts);
+      hips.position.y = 0.74;
+      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.16, 0.5, 8), shirt);
+      torso.position.y = 1.07;
+      const number = new THREE.Mesh(new THREE.CircleGeometry(0.07, 12), flat(0xffffff));
+      number.position.set(0, 1.1, 0.19);
+      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.08, 6), skin);
+      neck.position.y = 1.35;
+      body.add(hips, torso, number, neck);
+
+      // Big Wii-style head: eyes, brows and a mouth that changes shape.
+      const head = new THREE.Group();
+      head.position.y = 1.53;
+      const skull = new THREE.Mesh(new THREE.IcosahedronGeometry(0.17, 1), skin);
+      const hair = new THREE.Mesh(new THREE.IcosahedronGeometry(0.175, 1), flat(0x3b2416));
+      hair.scale.set(1, 0.6, 1);
+      hair.position.set(0, 0.07, -0.02);
+      const band = new THREE.Mesh(new THREE.TorusGeometry(0.168, 0.024, 6, 16), flat(0xff006e));
+      band.rotation.x = Math.PI / 2;
+      band.position.y = 0.06;
+      const eyeMat = flat(0x15151c);
+      const eyes = [-0.06, 0.06].map((x) => {
+        const e = new THREE.Mesh(new THREE.SphereGeometry(0.022, 8, 6), eyeMat);
+        e.position.set(x, 0.0, 0.152);
+        e.scale.z = 0.5;
+        return e;
+      });
+      const brows = [-0.06, 0.06].map((x) => {
+        const b = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.012, 0.01), eyeMat);
+        b.position.set(x, 0.045, 0.158);
+        return b;
+      });
+      const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.035, 0.009, 4, 10, Math.PI), flat(0x7a1f2b));
+      mouth.position.set(0, -0.07, 0.15);
+      head.add(skull, hair, band, ...eyes, ...brows, mouth);
+      body.add(head);
+
+      // Arms: one stretched cylinder from shoulder to pad, re-aimed every frame.
+      const arms = {}, pads = {}, shoulders = {};
+      for (const side of ["left", "right"]) {
+        const sx = side === "left" ? -1 : 1;   // the player's left is the trainer's -x (it faces the player)
+        shoulders[side] = new THREE.Vector3(sx * 0.23, 1.28, 0);
+        const shoulderBall = new THREE.Mesh(new THREE.IcosahedronGeometry(0.065, 0), shirt);
+        shoulderBall.position.copy(shoulders[side]);
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.04, 1, 6).translate(0, 0.5, 0), skin);
+        body.add(shoulderBall, arm);
+        arms[side] = arm;
+
+        const padGroup = new THREE.Group();
+        const faceMat = flat(0xe8e8e8, { emissive: 0x000000 });
+        const face = new THREE.Mesh(new THREE.CylinderGeometry(PAD_R, PAD_R * 0.92, 0.07, 12).rotateX(Math.PI / 2), faceMat);
+        const backing = new THREE.Mesh(new THREE.CylinderGeometry(PAD_R * 0.9, PAD_R * 0.7, 0.05, 10).rotateX(Math.PI / 2), flat(0x333344));
+        backing.position.z = -0.055;
+        const rimMat = new THREE.MeshBasicMaterial({ color: 0xffd60a, transparent: true, opacity: 0 });
+        const rim = new THREE.Mesh(new THREE.TorusGeometry(PAD_R + 0.012, 0.012, 6, 24), rimMat);
+        rim.position.z = 0.04;
+        const target = new THREE.Mesh(new THREE.RingGeometry(0.025, 0.045, 16), new THREE.MeshBasicMaterial({ color: 0xff3355, transparent: true, opacity: 0 }));
+        target.position.z = 0.0365;
+        padGroup.add(face, backing, rim, target);
+        body.add(padGroup);
+        pads[side] = { group: padGroup, faceMat, rimMat, target, recoil: 0, raise: 0, pos: new THREE.Vector3(), quat: new THREE.Quaternion() };
+      }
+
+      root.visible = false;
+      scene.add(root);
+      return { root, body, head, mouth, brows, eyes, arms, pads, shoulders, scale: 1, react: null, reactT: 0, mood: 0 };
+    })();
+
+    const padLayout = { up: {}, down: {} };   // per side, trainer-local positions
+    const Q_UP = new THREE.Quaternion();
+    const Q_DOWN = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.9, 0, 0));
+
+    function placeTrainer(headPos, forward) {
+      const dir = forward.clone().setY(0);
+      if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+      dir.normalize();
+      const s = clamp((headPos.y + 0.05) / 1.6, 0.75, 1.25);
+      trainer.scale = s;
+      trainer.root.scale.setScalar(s);
+      trainer.root.position.copy(headPos).addScaledVector(dir, TRAINER_DIST).setY(0);
+      trainer.root.lookAt(headPos.x, 0, headPos.z);
+      const padY = (headPos.y - 0.12) / s, padZ = (TRAINER_DIST - PAD_REACH) / s;
+      for (const side of ["left", "right"]) {
+        const sx = side === "left" ? -1 : 1;
+        padLayout.up[side] = new THREE.Vector3(sx * PAD_SPREAD / s, padY, padZ);
+        padLayout.down[side] = new THREE.Vector3(sx * 0.27, 1.0, 0.16);
+        if (!trainer.root.visible) trainer.pads[side].pos.copy(padLayout.down[side]);
+      }
+      trainer.root.visible = true;
+      // Panel floats above and slightly behind the trainer's head.
+      panel.mesh.position.copy(trainer.root.position).addScaledVector(dir, 0.1);
+      panel.mesh.position.y = headPos.y + 0.45;
+      panel.mesh.lookAt(headPos);
+      panel.mesh.visible = true;
+    }
+
+    function react(kind) {
+      trainer.react = kind;
+      trainer.reactT = performance.now();
+    }
+
+    const Y_AXIS = new THREE.Vector3(0, 1, 0);
+    function animateTrainer(now, dt, headPos) {
+      const t = now / 1000;
+      const b = trainer.body;
+      b.position.y = 0.012 * Math.abs(Math.sin(t * 3.2));
+      b.position.x = 0.012 * Math.sin(t * 1.6);
+      let lean = 0, nod = 0, shake = 0, smile = trainer.mood;
+      if (trainer.react) {
+        const k = (now - trainer.reactT) / 600;
+        if (k >= 1) trainer.react = null;
+        else if (trainer.react === "hit") { lean = -0.14 * (1 - k); nod = 0.22 * Math.sin(k * Math.PI * 2) * (1 - k); smile = 1; }
+        else if (trainer.react === "miss") { shake = 0.4 * Math.sin(k * Math.PI * 4) * (1 - k); smile = -1; }
+        else if (trainer.react === "cheer") { nod = 0.3 * Math.sin(k * Math.PI * 3); smile = 1; }
+      }
+      b.rotation.x = lean;
+      trainer.head.lookAt(headPos);
+      trainer.head.rotateX(-nod);
+      trainer.head.rotateY(shake);
+      // Mouth: an arc that flips between smile and frown.
+      trainer.mouth.rotation.z = smile >= 0 ? Math.PI : 0;
+      trainer.mouth.position.y = smile >= 0 ? -0.06 : -0.09;
+      trainer.mouth.scale.set(smile === 0 ? 0.8 : 1, smile === 0 ? 0.3 : 1, 1);
+      for (const br of trainer.brows) br.rotation.z = (br.position.x < 0 ? 1 : -1) * (smile < 0 ? 0.35 : 0);
+
+      for (const side of ["left", "right"]) {
+        const p = trainer.pads[side];
+        const target = p.raise > 0.5 ? padLayout.up[side] : padLayout.down[side];
+        if (!target) continue;
+        const follow = 1 - Math.exp(-dt * 14);
+        p.pos.lerp(target, follow);
+        p.quat.slerp(p.raise > 0.5 ? Q_UP : Q_DOWN, follow);
+        p.recoil = Math.max(0, p.recoil - dt * 4);
+        p.group.position.copy(p.pos);
+        p.group.position.z -= p.recoil * 0.12 / trainer.scale;
+        p.group.quaternion.copy(p.quat);
+        // Aim the arm from the shoulder to the back of the pad.
+        const sh = trainer.shoulders[side];
+        const hand = tmp().copy(p.group.position).add(tmp().set(0, 0, -0.06).applyQuaternion(p.group.quaternion));
+        const d = hand.sub(sh);
+        const arm = trainer.arms[side];
+        arm.position.copy(sh);
+        arm.scale.set(1, Math.max(0.05, d.length()), 1);
+        arm.quaternion.setFromUnitVectors(Y_AXIS, d.normalize());
+      }
+    }
+
+    // ---------------------------------------------------------------- particles, rings, popups
+    const effects = [];
+    const partGeo = new THREE.TetrahedronGeometry(0.02);
+    const ringGeo = new THREE.TorusGeometry(1, 0.06, 4, 24);
+    function burst(pos, color, n, speed) {
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
+      for (let i = 0; i < n; i++) {
+        const m = new THREE.Mesh(partGeo, mat);
+        m.position.copy(pos);
+        const vel = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.2, Math.random() - 0.5).normalize().multiplyScalar(speed * (0.5 + Math.random()));
+        scene.add(m);
+        effects.push({ obj: m, vel, life: 0.5 + Math.random() * 0.3, max: 0.8, kind: "part", spin: Math.random() * 10 });
+      }
+      effects.push({ obj: null, mat, life: 0.9, max: 0.9, kind: "mat" });
+    }
+    function ring(pos, quat, color) {
+      const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false }));
+      m.position.copy(pos);
+      m.quaternion.copy(quat);
+      m.scale.setScalar(PAD_R);
+      scene.add(m);
+      effects.push({ obj: m, life: 0.35, max: 0.35, kind: "ring" });
+    }
+    function popup(text, color, pos, size = 1, sub = null) {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 192;
+      const x = c.getContext("2d");
+      x.textAlign = "center";
+      x.lineJoin = "round";
+      x.font = font(sub ? 96 : 110);
+      x.lineWidth = 14;
+      x.strokeStyle = "rgba(0,0,0,0.75)";
+      x.fillStyle = color;
+      const y = sub ? 100 : 130;
+      x.strokeText(text, 256, y);
+      x.fillText(text, 256, y);
+      if (sub) {
+        x.font = font(48);
+        x.lineWidth = 9;
+        x.strokeText(sub, 256, 168);
+        x.fillStyle = "#ffffff";
+        x.fillText(sub, 256, 168);
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+      s.renderOrder = 20;
+      s.scale.set(0.36 * size, 0.135 * size, 1);
+      s.position.copy(pos);
+      scene.add(s);
+      effects.push({ obj: s, life: 0.9, max: 0.9, kind: "popup" });
+    }
+    function updateEffects(dt) {
+      for (let i = effects.length - 1; i >= 0; i--) {
+        const e = effects[i];
+        e.life -= dt;
+        const k = clamp(e.life / e.max, 0, 1);
+        if (e.kind === "part") {
+          e.vel.y -= 3.5 * dt;
+          e.obj.position.addScaledVector(e.vel, dt);
+          e.obj.rotation.x += e.spin * dt;
+          e.obj.rotation.y += e.spin * dt;
+          e.obj.scale.setScalar(k);
+        } else if (e.kind === "ring") {
+          e.obj.scale.setScalar(PAD_R * (1 + 1.6 * (1 - k)));
+          e.obj.material.opacity = k;
+        } else if (e.kind === "popup") {
+          e.obj.position.y += dt * 0.28;
+          e.obj.material.opacity = Math.min(1, k * 2);
+        }
+        if (e.life <= 0) {
+          if (e.obj) {
+            scene.remove(e.obj);
+            if (e.kind === "popup") { e.obj.material.map.dispose(); e.obj.material.dispose(); }
+            if (e.kind === "ring") e.obj.material.dispose();
+          } else if (e.mat) e.mat.dispose();
+          effects.splice(i, 1);
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------- gloves (tracked hands)
+    function makeGlove(color) {
+      const group = new THREE.Group();
+      const leather = flat(color, { roughness: 0.45, transparent: true });
+      const cuffMat = flat(0xf2f2f2, { roughness: 0.7, transparent: true });
+      const fist = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1), leather);
+      fist.scale.set(0.055, 0.047, 0.068);
+      fist.position.set(0, 0, -0.085);
+      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.046, 0.05, 0.075, 8), cuffMat);
+      cuff.rotation.x = Math.PI / 2;
+      const stripe = new THREE.Mesh(new THREE.CylinderGeometry(0.0505, 0.0505, 0.014, 8), flat(0xffd60a, { transparent: true }));
+      stripe.rotation.x = Math.PI / 2;
+      stripe.position.z = -0.02;
+      group.add(fist, cuff, stripe);
+      const thumb = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), leather);
+      thumb.scale.set(0.022, 0.022, 0.03);
+      group.visible = false;
+      thumb.visible = false;
+      scene.add(group, thumb);
+      return { group, thumb, materials: [leather, cuffMat, stripe.material], opacity: 0 };
+    }
+
+    const JOINT = (h, name) => {
+      const j = h && h.joints && h.joints[name];
+      return j && j.visible ? j.getWorldPosition(new THREE.Vector3()) : null;
+    };
+    const hands = {};
+    for (const i of [0, 1]) {
+      const hand = renderer.xr.getHand(i);
+      scene.add(hand);
+      hand.addEventListener("connected", (e) => {
+        const side = e.data.handedness;
+        hand.userData.side = side;
+        if (!hands[side]) hands[side] = {
+          side, obj: null, glove: makeGlove(side === "left" ? 0x2a6bd8 : 0xd8302a),
+          wasTracked: false, lastPos: null, lastT: 0, vel: new THREE.Vector3(), speed: 0,
+          fistPrev: null, lostSince: 0, lastHitT: 0, pinch: false, pinchSince: 0,
+        };
+        hands[side].obj = hand;
+      });
+      hand.addEventListener("disconnected", () => {
+        const side = hand.userData.side;
+        if (side && hands[side]) hands[side].obj = null;
+      });
+    }
+
+    const basis = new THREE.Matrix4();
+    function updateHand(h, now, dt) {
+      const wrist = JOINT(h.obj, "wrist");
+      const middle = JOINT(h.obj, "middle-finger-phalanx-proximal");
+      const index = JOINT(h.obj, "index-finger-phalanx-proximal");
+      const pinky = JOINT(h.obj, "pinky-finger-phalanx-proximal");
+      const tracked = !!(wrist && middle && index && pinky);
+      const g = h.glove;
+      let targetOpacity = 0;
+
+      if (tracked) {
+        const sdt = (now - h.lastT) / 1000;
+        if (h.lastPos && sdt > 0 && sdt < 0.1) {
+          const inst = tmp().copy(wrist).sub(h.lastPos).divideScalar(sdt);
+          if (inst.length() < MAX_HAND_SPEED) {
+            h.vel.lerp(inst, 0.5);
+            h.speed = h.vel.length();
+          }
+        }
+        h.lastPos = wrist.clone();
+        h.lastT = now;
+        const fwd = tmp().copy(middle).sub(wrist).normalize();
+        const side = tmp().copy(index).sub(pinky);
+        side.sub(tmp().copy(fwd).multiplyScalar(side.dot(fwd))).normalize();
+        const up = tmp().crossVectors(side, fwd).normalize();
+        basis.makeBasis(side, up, fwd.negate());
+        g.group.quaternion.setFromRotationMatrix(basis);
+        g.group.position.copy(wrist);
+        const thumb = JOINT(h.obj, "thumb-phalanx-distal");
+        g.thumb.visible = !!thumb;
+        if (thumb) { g.thumb.position.copy(thumb); g.thumb.quaternion.copy(g.group.quaternion); }
+        targetOpacity = 1;
+
+        const tt = JOINT(h.obj, "thumb-tip"), it = JOINT(h.obj, "index-finger-tip");
+        const pinching = !!(tt && it && tt.distanceTo(it) < PINCH_M) && h.speed < 0.8;
+        if (pinching && !h.pinch) { h.pinchSince = now; onPinch(h.side, now); }
+        h.pinch = pinching;
+        if (pinching && now - h.pinchSince > 1500) { h.pinchSince = Infinity; onPinchHold(h.side, now); }
+      } else {
+        if (h.wasTracked) h.lostSince = now;
+        h.pinch = false;
+        g.thumb.visible = false;
+        const lostFor = now - h.lostSince;
+        if (h.lastPos && lostFor < GHOST_MS) {
+          g.group.position.copy(h.lastPos).addScaledVector(h.vel, lostFor / 1000);
+          targetOpacity = 0.4;
+        }
+      }
+      g.opacity += (targetOpacity - g.opacity) * (1 - Math.exp(-dt * 18));
+      for (const m of g.materials) m.opacity = g.opacity;
+      g.group.visible = g.opacity > 0.03;
+      if (!g.group.visible) g.thumb.visible = false;
+
+      // Swept hit test of the fist against both pads.
+      if (g.group.visible && targetOpacity > 0 && trainer.root.visible) {
+        const fist = g.group.localToWorld(new THREE.Vector3(0, 0, -0.085));
+        if (h.fistPrev && now - h.lastHitT > HIT_DEBOUNCE_MS) {
+          for (const side of ["left", "right"]) {
+            const p = trainer.pads[side];
+            if (p.raise < 0.5) continue;
+            const c = p.group.getWorldPosition(tmp());
+            const n = tmp().set(0, 0, 1).applyQuaternion(p.group.getWorldQuaternion(new THREE.Quaternion()));
+            const approach = -h.vel.dot(n);
+            if (approach > HIT_MIN_APPROACH && segmentHitsSphere(h.fistPrev, fist, c, PAD_R * trainer.scale + GLOVE_R)) {
+              h.lastHitT = now;
+              onPadHit(side, approach, now, c, n);
+              break;
+            }
+          }
+        }
+        h.fistPrev = fist;
+      } else {
+        h.fistPrev = null;
+      }
+      h.wasTracked = tracked;
+    }
+
+    function segmentHitsSphere(p0, p1, c, r) {
+      const d = tmp().copy(p1).sub(p0);
+      const len2 = d.lengthSq();
+      const t = len2 > 0 ? clamp(tmp().copy(c).sub(p0).dot(d) / len2, 0, 1) : 0;
+      return tmp().copy(p0).addScaledVector(d, t).distanceTo(c) <= r;
+    }
+
+    // ---------------------------------------------------------------- phone app link (tools/serve_xr.py)
+    const rig = { reachable: false, online: false, estop: false, session: null, error: "connecting", offset: 0 };
+    async function pollRig() {
+      const t0 = Date.now();
+      try {
+        const r = await fetch("/rig/state", { cache: "no-store" });
+        const j = await r.json();
+        const t1 = Date.now();
+        if (t1 - t0 < 300) rig.offset = j.now - (t0 + t1) / 2;   // laptop clock minus headset clock
+        Object.assign(rig, { reachable: true, online: j.online, estop: j.estop, session: j.session, error: j.error });
+      } catch {
+        Object.assign(rig, { reachable: false, online: false, session: null, error: "laptop server unreachable" });
+      }
+      setTimeout(pollRig, 300);
+    }
+    pollRig();
+
+    function postEvent(kind, arm, reactionMs) {
+      if (game.source !== "phone") return;
+      const sessionId = game.session.id;
+      fetch("/rig/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, kind, arm, reactionMs }),
+      }).then((r) => r.json()).then((j) => {
+        // The phone stopped or finished the session: wrap up here too.
+        if (j.accepted === false && game.session && game.session.id === sessionId && game.state === "round") endRound("stopped");
+      }).catch(() => {});
+    }
+
+    // ---------------------------------------------------------------- game state
+    const game = {
+      state: "setup", source: null, session: null, played: new Set(), reason: "",
+      score: 0, hits: 0, misses: 0, streak: 0, bestStreak: 0, reactionSum: 0,
+      sides: null, active: null, nextAt: 0, arm: "left", run: 0, lastCount: null, missingSince: 0, actionAt: 0,
+    };
+    const now0 = () => Date.now();
+
+    function resetScore() {
+      Object.assign(game, { score: 0, hits: 0, misses: 0, streak: 0, bestStreak: 0, reactionSum: 0, active: null, lastCount: null, missingSince: 0 });
+      game.sides = { left: { hits: 0, misses: 0, rs: 0 }, right: { hits: 0, misses: 0, rs: 0 } };
+    }
+    resetScore();
+
+    function startRound(source, s) {
+      const d = DIFFICULTIES[s.difficulty] || DIFFICULTIES.medium;
+      resetScore();
+      game.source = source;
+      game.session = {
+        id: s.id, mode: s.mode, difficulty: s.difficulty,
+        windowMs: s.windowMs ?? d.windowMs, maxRun: s.maxRun ?? d.maxRun, gapMs: s.gapMs ?? d.gapMs,
+        start: s.startsAt - (source === "phone" ? rig.offset : 0),
+        end: s.endsAt - (source === "phone" ? rig.offset : 0),
+      };
+      if (source === "phone") game.played.add(s.id);
+      game.arm = Math.random() < 0.5 ? "left" : "right";
+      game.run = 0;
+      game.state = "countdown";
+      trainer.mood = 0;
+    }
+    function startPractice() {
+      const now = now0();
+      startRound("practice", { id: `practice-${now}`, mode: "standard", difficulty: "medium", startsAt: now + COUNTDOWN_MS, endsAt: now + COUNTDOWN_MS + MODES.standard.durationS * 1000 });
+    }
+    function endRound(reason) {
+      if (game.state !== "round" && game.state !== "countdown") return;
+      game.reason = reason;
+      game.active = null;
+      game.state = "results";
+      game.actionAt = performance.now() + 1500;   // ignore pinches for a moment
+      sfx.bell();
+      const acc = game.hits + game.misses ? game.hits / (game.hits + game.misses) : 0;
+      if (reason === "done" && acc >= 0.6 && game.hits >= 5) { sfx.cheer(); react("cheer"); trainer.mood = 1; }
+      else trainer.mood = 0;
+    }
+
+    function present(now) {
+      const s = game.session;
+      if (game.run < s.maxRun && Math.random() < 0.5 && game.run > 0) game.run++;
+      else if (game.run > 0) { game.arm = game.arm === "left" ? "right" : "left"; game.run = 1; }
+      else game.run = 1;
+      game.active = { arm: game.arm, since: now };
+      sfx.present();
+      postEvent("present", game.arm);
+    }
+
+    function padWorld(side) {
+      const p = trainer.pads[side].group;
+      return { pos: p.getWorldPosition(tmp()), quat: p.getWorldQuaternion(new THREE.Quaternion()) };
+    }
+
+    function onPadHit(side, speed, perfNow, center, normal) {
+      const power = clamp(speed / 6, 0.25, 1);
+      const pad = trainer.pads[side];
+      pad.recoil = 1;
+      const fx = center.clone().addScaledVector(normal, 0.05);
+      const { quat } = padWorld(side);
+      if (game.state === "round") {
+        if (!game.active || game.active.arm !== side) { sfx.tap(); return; }
+        const now = now0();
+        const reaction = Math.max(0, Math.round(now - game.active.since));
+        const pts = pointsFor(reaction, game.streak);
+        game.score += pts;
+        game.hits++;
+        game.streak++;
+        game.bestStreak = Math.max(game.bestStreak, game.streak);
+        game.reactionSum += reaction;
+        game.sides[side].hits++;
+        game.sides[side].rs += reaction;
+        game.active = null;
+        game.nextAt = now + game.session.gapMs;
+        postEvent("hit", side, reaction);
+        const [label, color] = rating(reaction);
+        sfx.hit(power);
+        if (reaction < 400) sfx.perfect();
+        burst(fx, color, 10 + Math.round(power * 14), 1.2 + power * 1.8);
+        ring(fx, quat, color);
+        popup(`+${pts}`, color, fx.clone().add(tmp().set(0, 0.12, 0)), 1, `${label}  ${reaction} ms`);
+        react("hit");
+        if (game.streak % 5 === 0) {
+          sfx.streak(game.streak);
+          popup(`${game.streak} STREAK!`, "#ffd60a", trainer.head.getWorldPosition(tmp()).add(tmp().set(0, 0.28, 0)), 1.2);
+        }
+      } else {
+        // Free play between rounds: everything reacts, nothing scores.
+        sfx.hit(power);
+        burst(fx, 0xffd60a, 6 + Math.round(power * 10), 1 + power * 1.5);
+        ring(fx, quat, 0xffffff);
+        if (Math.random() < 0.3) react("hit");
+      }
+    }
+
+    function miss(now) {
+      const side = game.active.arm;
+      game.misses++;
+      game.streak = 0;
+      game.sides[side].misses++;
+      game.active = null;
+      game.nextAt = now + game.session.gapMs;
+      postEvent("miss", side);
+      sfx.miss();
+      const { pos } = padWorld(side);
+      popup("MISS", "#ff5a5a", pos.add(tmp().set(0, 0.15, 0)), 0.9);
+      react("miss");
+    }
+
+    function onPinch(side, perfNow) {
+      if (perfNow < game.actionAt) return;
+      if (game.state === "setup" && side === "right") {
+        game.state = "lobby";
+        game.actionAt = perfNow + 600;
+        sfx.beep(true);
+      } else if ((game.state === "lobby" || game.state === "results") && side === "right") {
+        game.actionAt = perfNow + 600;
+        startPractice();
+      }
+    }
+    function onPinchHold(side, perfNow) {
+      if (side === "left" && (game.state === "lobby" || game.state === "results")) {
+        game.state = "setup";
+        game.actionAt = perfNow + 600;
+        sfx.beep(false);
+      }
+    }
+
+    function updateGame() {
+      const now = now0();
+      // E-STOP from the phone overrides everything.
+      if (rig.estop && game.state !== "estop") {
+        if (game.state === "round" || game.state === "countdown") endRound("estop");
+        game.state = "estop";
+        sfx.miss();
+      } else if (!rig.estop && game.state === "estop") {
+        game.state = "lobby";
+      }
+
+      // A new phone session takes over the lobby, the results screen, or a practice round.
+      const s = rig.session;
+      const idle = game.state === "lobby" || game.state === "results" ||
+        (game.source === "practice" && (game.state === "countdown" || game.state === "round"));
+      if (s && !game.played.has(s.id) && idle && s.endsAt - rig.offset > now) startRound("phone", s);
+
+      // The phone ended our session early (stop button or finished on the server).
+      if (game.source === "phone" && (game.state === "countdown" || game.state === "round") && rig.online) {
+        if (!s || s.id !== game.session.id) {
+          if (!game.missingSince) game.missingSince = now;
+          else if (now - game.missingSince > 1500) endRound(now >= game.session.end ? "done" : "stopped");
+        } else game.missingSince = 0;
+      }
+
+      if (game.state === "countdown") {
+        const left = game.session.start - now;
+        const n = Math.ceil(left / 1000);
+        if (n !== game.lastCount && n > 0 && n <= 3) sfx.beep(false);
+        game.lastCount = n;
+        if (left <= 0) {
+          game.state = "round";
+          game.nextAt = now + 500;
+          sfx.bell();
+        }
+      } else if (game.state === "round") {
+        if (now >= game.session.end) endRound("done");
+        else if (game.active && now - game.active.since > game.session.windowMs) miss(now);
+        else if (!game.active && now >= game.nextAt) present(now);
+      }
+
+      // Which pads are up: the active one in a round, both between rounds (free play).
+      const freePlay = game.state === "lobby" || game.state === "results";
+      for (const side of ["left", "right"]) {
+        const p = trainer.pads[side];
+        const up = freePlay || (game.state === "round" && game.active && game.active.arm === side);
+        p.raise = up ? 1 : 0;
+        const active = game.state === "round" && game.active && game.active.arm === side;
+        const k = active ? clamp((now - game.active.since) / game.session.windowMs, 0, 1) : 0;
+        p.rimMat.opacity = active ? 1 : 0;
+        p.rimMat.color.setHSL(0.15 * (1 - k), 1, 0.55);   // yellow -> red as the window runs out
+        p.target.material.opacity = active ? 0.9 : 0;
+        const pulse = active ? 0.35 + 0.25 * Math.sin(performance.now() / 70) : 0;
+        p.faceMat.color.set(active ? 0xffd60a : 0xe8e8e8);
+        p.faceMat.emissive.setRGB(pulse, pulse * 0.8, 0);
+      }
+    }
+
+    // ---------------------------------------------------------------- panel drawing
+    function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+    function fmtTime(ms) {
+      const s = Math.max(0, Math.ceil(ms / 1000));
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }
+    function drawPanel() {
+      const { ctx, canvas } = panel;
+      const W = canvas.width, H = canvas.height;
+      const now = now0();
+      ctx.clearRect(0, 0, W, H);
+      const accent = game.state === "estop" ? "#ff3344" : game.state === "round" ? "#ffd60a" : "#3a86ff";
+      rr(ctx, 6, 6, W - 12, H - 12, 40);
+      ctx.fillStyle = game.state === "estop" ? "rgba(70,8,14,0.9)" : "rgba(14,14,22,0.86)";
+      ctx.fill();
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = accent;
+      ctx.stroke();
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff";
+
+      const linkLine = () => {
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = rig.online ? "#7dffb0" : "#ff9f9f";
+        ctx.fillText(rig.online ? "PHONE APP CONNECTED" : `PHONE APP OFFLINE (${rig.error || "no link"})`, W / 2, H - 46);
+      };
+
+      if (game.state === "setup") {
+        ctx.font = font(84);
+        ctx.fillText("PLACE YOUR TRAINER", W / 2, 140);
+        ctx.font = "500 38px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText("Face the robot arms and stand where you'll punch.", W / 2, 250);
+        ctx.fillText("The trainer follows your gaze.", W / 2, 305);
+        ctx.font = font(56);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fillText("PINCH RIGHT HAND TO LOCK", W / 2, 430);
+        linkLine();
+      } else if (game.state === "lobby") {
+        ctx.font = font(104);
+        ctx.fillText("WAX ON WAX OFF", W / 2, 140);
+        ctx.font = "500 38px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText(rig.online ? "Start a session on the phone app" : "Warm up: hit the pads!", W / 2, 240);
+        ctx.font = font(52);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fillText("PINCH RIGHT: 60 s PRACTICE", W / 2, 350);
+        ctx.font = "500 32px system-ui";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("Hold a left pinch to move the trainer", W / 2, 430);
+        linkLine();
+      } else if (game.state === "countdown") {
+        const n = Math.max(1, Math.ceil((game.session.start - now) / 1000));
+        ctx.font = font(56);
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(`${MODES[game.session.mode]?.label || ""}  ·  ${DIFFICULTIES[game.session.difficulty]?.label || ""}${game.source === "practice" ? "  ·  PRACTICE" : ""}`, W / 2, 110);
+        ctx.font = font(330);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fillText(String(n), W / 2, 470);
+      } else if (game.state === "round") {
+        const left = game.session.end - now, total = game.session.end - game.session.start;
+        ctx.textAlign = "left";
+        ctx.font = font(46);
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(`${MODES[game.session.mode]?.label || ""} · ${DIFFICULTIES[game.session.difficulty]?.label || ""}`, 50, 90);
+        ctx.textAlign = "right";
+        ctx.fillStyle = left < 10000 ? "#ff5a5a" : "#fff";
+        ctx.font = font(80);
+        ctx.fillText(fmtTime(left), W - 50, 100);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#fff";
+        ctx.font = font(230);
+        ctx.fillText(String(game.score), W / 2, 360);
+        ctx.font = font(64);
+        ctx.fillStyle = game.streak >= 5 ? "#ffd60a" : "#9fd8ff";
+        ctx.fillText(game.streak > 1 ? `x${game.streak} STREAK` : `${game.hits} HITS  ·  ${game.misses} MISSES`, W / 2, 460);
+        rr(ctx, 50, H - 90, W - 100, 30, 15);
+        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        ctx.fill();
+        rr(ctx, 50, H - 90, (W - 100) * clamp(left / total, 0, 1), 30, 15);
+        ctx.fillStyle = accent;
+        ctx.fill();
+      } else if (game.state === "results") {
+        const n = game.hits + game.misses;
+        const acc = n ? Math.round((100 * game.hits) / n) : 0;
+        const avg = game.hits ? Math.round(game.reactionSum / game.hits) : 0;
+        ctx.font = font(64);
+        ctx.fillStyle = game.reason === "done" ? "#ffd60a" : "#ff9f9f";
+        ctx.fillText(game.reason === "done" ? "ROUND OVER" : game.reason === "estop" ? "STOPPED: E-STOP" : "STOPPED FROM PHONE", W / 2, 90);
+        ctx.font = font(170);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(String(game.score), W / 2, 255);
+        const stats = [
+          ["HITS", game.hits], ["ACCURACY", `${acc}%`], ["AVG REACTION", avg ? `${avg} ms` : "-"], ["BEST STREAK", game.bestStreak],
+        ];
+        stats.forEach(([k, v], i) => {
+          const x = 140 + i * 248;
+          ctx.font = "600 26px system-ui";
+          ctx.fillStyle = "#aaa";
+          ctx.fillText(k, x, 330);
+          ctx.font = font(60);
+          ctx.fillStyle = "#fff";
+          ctx.fillText(String(v), x, 395);
+        });
+        const L = game.sides.left, R = game.sides.right;
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = "#7fb0ff";
+        ctx.fillText(`LEFT ${L.hits}/${L.hits + L.misses}`, W / 2 - 170, 460);
+        ctx.fillStyle = "#ff8f86";
+        ctx.fillText(`RIGHT ${R.hits}/${R.hits + R.misses}`, W / 2 + 170, 460);
+        if (avg) {
+          const [label, color] = rating(avg);
+          ctx.font = font(44);
+          ctx.fillStyle = color;
+          ctx.fillText(label, W / 2, 520);
+        }
+        ctx.font = "500 30px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText(game.source === "phone" ? "Saved to your account · pinch right to practice" : "Pinch right to go again", W / 2, H - 46);
+      } else if (game.state === "estop") {
+        ctx.font = font(170);
+        ctx.fillStyle = "#ff3344";
+        ctx.fillText("E-STOP", W / 2, 300);
+        ctx.font = "500 40px system-ui";
+        ctx.fillStyle = "#fff";
+        ctx.fillText("Stopped from the phone app.", W / 2, 400);
+        ctx.fillText("Reset it there to continue.", W / 2, 455);
+      }
+      panel.tex.needsUpdate = true;
+    }
+
+    // ---------------------------------------------------------------- main loop
+    const viewerPos = new THREE.Vector3(), viewerDir = new THREE.Vector3();
+    let lastT = performance.now(), lastPanel = 0;
+    renderer.setAnimationLoop(() => {
+      const perfNow = performance.now();
+      const dt = Math.min(0.05, (perfNow - lastT) / 1000);
+      lastT = perfNow;
+      const view = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+      view.getWorldPosition(viewerPos);
+      view.getWorldDirection(viewerDir);
+
+      if (game.state === "setup" || !trainer.root.visible) placeTrainer(viewerPos, viewerDir);
+      for (const h of Object.values(hands)) if (h.obj) updateHand(h, perfNow, dt);
+      updateGame();
+      animateTrainer(perfNow, dt, viewerPos);
+      updateEffects(dt);
+      panel.mesh.lookAt(viewerPos);
+      if (perfNow - lastPanel > 66) { drawPanel(); lastPanel = perfNow; }
+      renderer.render(scene, camera);
+    });
+
+    // ---------------------------------------------------------------- enter XR
+    async function init() {
+      if (!navigator.xr || !(await navigator.xr.isSessionSupported("immersive-ar"))) {
+        enterBtn.textContent = "Passthrough AR not supported here";
+        game.state = "lobby";   // desktop preview: show the trainer and the lobby
+        return;
+      }
+      enterBtn.disabled = false;
+      enterBtn.textContent = "Enter the ring";
+      enterBtn.onclick = async () => {
+        initAudio();
+        const session = await navigator.xr.requestSession("immersive-ar", { optionalFeatures: ["local-floor", "hand-tracking"] });
+        await renderer.xr.setSession(session);
+        game.state = "setup";
+        trainer.root.visible = false;
+        session.addEventListener("end", () => { enterBtn.textContent = "Enter the ring again"; });
+      };
+    }
+    init();
+  </script>
+</body>
+</html>
