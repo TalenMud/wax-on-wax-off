@@ -1,0 +1,9 @@
+{
+  "name": "Wax On Wax Off",
+  "short_name": "Wax On",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#121012",
+  "theme_color": "#121012",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
