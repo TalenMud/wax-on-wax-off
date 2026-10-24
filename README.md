@@ -7,5 +7,6 @@ The arm holds a foam pad and moves it to targets; the player strikes the pad.
 |---|---|
 | `brain/` | Robot control, perception, game logic, WebSocket hub (robot laptop) |
 | `web/` | Phone app: sessions, live score, history, leaderboard (Convex). See `web/README.md` |
+| `dashboard/` | Single-page live dashboard for the WebSocket hub |
 | `vr/` | WebXR score display for the headset |
 | `tools/` | Dev tools, including a mock hub |
