@@ -11,6 +11,9 @@
     button { font-size: 18px; padding: 12px 18px; border: 0; border-radius: 8px; background: #ffd60a; color: #111; font-weight: 700; }
     button:disabled { background: #444; color: #999; }
     #status { margin-top: 8px; color: #aaa; font-size: 14px; line-height: 1.5; }
+    #import { display: block; margin-top: 14px; font-size: 14px; color: #ddd; }
+    #import input { display: block; margin-top: 6px; }
+    #song { margin-top: 6px; color: #ffd60a; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -19,6 +22,9 @@
     <button id="enter" disabled>Checking WebXR…</button>
     <div id="status">Put the controllers down: your hands become the gloves.<br>
       Link your phone with the code shown in the headset, then pinch your right hand to start.</div>
+    <label id="import">Rhythm mode: import your own song + its beatmap (.json)
+      <input id="import-files" type="file" accept="audio/*,.json,application/json" multiple></label>
+    <div id="song">No song loaded</div>
   </div>
   <script type="importmap">
     { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
@@ -873,10 +879,159 @@
       sfx.cheer();
     }
 
+    // ---------------------------------------------------------------- rhythm mode
+    // The player's own music: a song + beatmap from vr/music/library.json (tools/make_beatmap.py,
+    // gitignored) or imported on the page before entering the ring. An approach circle shrinks onto
+    // a pad over APPROACH_MS; punch it as the circle closes, on the beat.
+    const APPROACH_MS = 1100;
+    const PERFECT_MS = 70, GOOD_MS = 150;
+    const rhythm = { song: null, buffer: null, bufferUrl: null, src: null, startAt: 0, notes: [], done: false,
+                     score: 0, combo: 0, bestCombo: 0, perfect: 0, good: 0, miss: 0 };
+    const songEl = document.getElementById("song");
+    function setSong(map, url) {
+      rhythm.song = { map, url };
+      songEl.textContent = `Song: ${map.title} · ${Math.round(map.bpm)} BPM · ${map.notes.length} pads`;
+    }
+    (async () => {
+      try {
+        const lib = await (await fetch("music/library.json", { cache: "no-store" })).json();
+        const last = lib[lib.length - 1];
+        if (last) {
+          const map = await (await fetch(`music/${last.map}`, { cache: "no-store" })).json();
+          setSong(map, `music/${map.audio}`);
+        }
+      } catch {
+        // no library yet: import a song instead
+      }
+    })();
+    document.getElementById("import-files").addEventListener("change", async (e) => {
+      const files = [...e.target.files];
+      const json = files.find((f) => f.name.endsWith(".json"));
+      const audio = files.find((f) => !f.name.endsWith(".json"));
+      if (!json || !audio) {
+        songEl.textContent = "Pick both the song and its beatmap (.json) together";
+        return;
+      }
+      try {
+        const map = JSON.parse(await json.text());
+        if (!Array.isArray(map.notes)) throw new Error("no notes");
+        setSong(map, URL.createObjectURL(audio));   // stays on this device; nothing is uploaded
+      } catch {
+        songEl.textContent = "That beatmap isn't valid JSON from tools/make_beatmap.py";
+      }
+    });
+
+    // Where the song is now, as heard (ms from the start of the audio).
+    const songMs = () => (actx.currentTime - rhythm.startAt - (actx.outputLatency || actx.baseLatency || 0)) * 1000;
+
+    async function startRhythm(perfNow) {
+      game.actionAt = perfNow + 600;
+      if (!rhythm.song) {
+        game.notice = "No song loaded: import one on the page before entering";
+        return;
+      }
+      stopRhythm();
+      game.notice = "";
+      game.state = "rhythm";
+      Object.assign(rhythm, { done: false, score: 0, combo: 0, bestCombo: 0, perfect: 0, good: 0, miss: 0 });
+      rhythm.notes = rhythm.song.map.notes.map((n) => ({ t: n.t, side: n.side, judged: false, ring: null }));
+      try {
+        if (rhythm.bufferUrl !== rhythm.song.url) {
+          rhythm.buffer = await actx.decodeAudioData(await (await fetch(rhythm.song.url)).arrayBuffer());
+          rhythm.bufferUrl = rhythm.song.url;
+        }
+      } catch {
+        game.notice = "Couldn't load the song";
+        game.state = "menu";
+        return;
+      }
+      const src = actx.createBufferSource();
+      src.buffer = rhythm.buffer;
+      src.connect(master);
+      rhythm.startAt = actx.currentTime + 1.5;
+      src.start(rhythm.startAt);
+      src.onended = () => { if (rhythm.src === src) rhythm.done = true; };
+      rhythm.src = src;
+      sfx.bell();
+    }
+    function stopRhythm() {
+      if (rhythm.src) {
+        const src = rhythm.src;
+        rhythm.src = null;
+        try { src.stop(); } catch { /* not started yet */ }
+      }
+      for (const n of rhythm.notes) dropRing(n);
+    }
+    const approachGeo = new THREE.TorusGeometry(1, 0.035, 6, 32);
+    function dropRing(n) {
+      if (!n.ring) return;
+      n.ring.parent.remove(n.ring);
+      n.ring.material.dispose();
+      n.ring = null;
+    }
+    function judge(n, kind, perfNow) {
+      n.judged = true;
+      dropRing(n);
+      const pad = trainer.pads[n.side];
+      const pos = pad.group.getWorldPosition(tmp()).add(tmp().set(0, 0.13, 0));
+      if (kind === "miss") {
+        rhythm.miss++;
+        rhythm.combo = 0;
+        popup("MISS", "#ff5a5a", pos, 0.7);
+        if (Math.random() < 0.35) coachSay("miss");
+        return;
+      }
+      rhythm.combo++;
+      rhythm.bestCombo = Math.max(rhythm.bestCombo, rhythm.combo);
+      rhythm[kind]++;
+      rhythm.score += (kind === "perfect" ? 300 : 100) * (1 + Math.floor(rhythm.combo / 10) * 0.5);
+      popup(kind === "perfect" ? "PERFECT" : "GOOD", kind === "perfect" ? "#ffd60a" : "#9fd8ff", pos, 0.7);
+      if (rhythm.combo > 0 && rhythm.combo % 20 === 0) coachSay("streak");
+    }
+    // A punch on a pad during a song: the nearest open beat on that pad, if close enough.
+    function rhythmHit(side, perfNow) {
+      const t = songMs();
+      let best = null;
+      for (const n of rhythm.notes) {
+        if (n.judged || n.side !== side || Math.abs(n.t - t) > GOOD_MS) continue;
+        if (!best || Math.abs(n.t - t) < Math.abs(best.t - t)) best = n;
+      }
+      if (!best) return false;
+      judge(best, Math.abs(best.t - t) <= PERFECT_MS ? "perfect" : "good", perfNow);
+      return true;
+    }
+    function updateRhythm(perfNow) {
+      if (game.state !== "rhythm" || !actx) return;
+      const t = songMs();
+      for (const n of rhythm.notes) {
+        if (n.judged) continue;
+        if (t > n.t + GOOD_MS) { judge(n, "miss", perfNow); continue; }
+        const k = (n.t - t) / APPROACH_MS;   // 1 when it appears, 0 on the beat
+        if (k > 1) break;   // notes are in time order
+        if (!n.ring) {
+          n.ring = new THREE.Mesh(approachGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthTest: false }));
+          n.ring.renderOrder = 25;
+          n.ring.position.z = 0.04;
+          trainer.pads[n.side].group.add(n.ring);
+        }
+        n.ring.scale.setScalar((PAD_R + 0.01) * (1 + 2.2 * Math.max(0, k)));
+        n.ring.material.opacity = Math.min(1, (1 - k) * 2.5);
+        n.ring.material.color.setHSL(0.15, 1, 0.5 + 0.5 * Math.max(0, k));   // white -> yellow as it closes
+      }
+      const last = rhythm.notes[rhythm.notes.length - 1];
+      if (rhythm.done || (last && t > last.t + 2500)) {
+        stopRhythm();
+        game.state = "rhythmDone";
+        game.actionAt = perfNow + 1500;
+        sfx.bell();
+        coachSay("end", null, true);
+      }
+    }
+
     // ---------------------------------------------------------------- start screen
-    // START and ADJUST float between the player and the trainer, anchored where the player stood
-    // when the menu opened. Poke one with a fingertip; a right pinch is START, a left pinch ADJUST.
-    // Nothing starts a round (headset or phone) until START.
+    // ADJUST, RHYTHM and PLAY float between the player and the trainer, anchored where the player
+    // stood when the menu opened. Poke one with a fingertip; a right pinch is PLAY, a left pinch
+    // ADJUST. Nothing starts a round (headset or phone) until PLAY or RHYTHM.
     function makeButton(label) {
       // A red horizontal pill with white text; brighter, with a white rim, when a fingertip is near.
       const c = document.createElement("canvas");
@@ -910,7 +1065,7 @@
       scene.add(mesh);
       return { mesh, draw, hot: false };
     }
-    const menuButtons = { adjust: makeButton("ADJUST"), start: makeButton("START") };
+    const menuButtons = { adjust: makeButton("ADJUST"), rhythm: makeButton("RHYTHM"), start: makeButton("PLAY") };
     const menu = { anchored: false };
 
     function openMenu(perfNow) {
@@ -940,8 +1095,9 @@
         const right = tmp().crossVectors(dir, Y_UP).normalize();
         const base = tmp().copy(viewerPos).addScaledVector(dir, 0.42);
         base.y = viewerPos.y - 0.28;
-        menuButtons.adjust.mesh.position.copy(base).addScaledVector(right, -0.15);
-        menuButtons.start.mesh.position.copy(base).addScaledVector(right, 0.15);
+        menuButtons.adjust.mesh.position.copy(base).addScaledVector(right, -0.3);
+        menuButtons.rhythm.mesh.position.copy(base);
+        menuButtons.start.mesh.position.copy(base).addScaledVector(right, 0.3);
         for (const b of Object.values(menuButtons)) b.mesh.lookAt(viewerPos);
         menu.anchored = true;
       }
@@ -962,6 +1118,7 @@
           b.hot = false;
           b.draw(false);
           if (name === "start") pressStart(perfNow);
+          else if (name === "rhythm") startRhythm(perfNow);
           else pressAdjust(perfNow);
           return;
         }
@@ -1046,6 +1203,13 @@
       pad.recoil = 1;
       const fx = center.clone().addScaledVector(normal, 0.05);
       const { quat } = padWorld(side);
+      if (game.state === "rhythm") {
+        sfx.hit(power);
+        const onBeat = rhythmHit(side, perfNow);
+        burst(fx, onBeat ? 0xffd60a : 0x888888, onBeat ? 8 + Math.round(power * 10) : 4, 1 + power * 1.5);
+        if (onBeat) ring(fx, quat, 0xffd60a);
+        return;
+      }
       if (game.state === "round") {
         if (!game.active || game.active.arm !== side) { sfx.tap(); return; }
         const now = now0();
@@ -1104,6 +1268,8 @@
       if (game.state === "menu") {
         if (side === "right") pressStart(perfNow);
         else pressAdjust(perfNow);
+      } else if (game.state === "rhythmDone" && side === "right") {
+        startRhythm(perfNow);
       } else if (game.state === "setup" && side === "right") {
         openMenu(perfNow);
         sfx.beep(true);
@@ -1115,7 +1281,8 @@
       }
     }
     function onPinchHold(side, perfNow) {
-      if (side === "left" && (game.state === "lobby" || game.state === "results")) {
+      if (side === "left" && ["lobby", "results", "rhythm", "rhythmDone"].includes(game.state)) {
+        stopRhythm();
         openMenu(perfNow);
         sfx.beep(false);
       }
@@ -1157,7 +1324,7 @@
       const freePlay = game.state === "lobby" || game.state === "results";
       for (const side of ["left", "right"]) {
         const p = trainer.pads[side];
-        const up = freePlay || (game.state === "round" && game.active && game.active.arm === side);
+        const up = freePlay || game.state === "rhythm" || (game.state === "round" && game.active && game.active.arm === side);
         p.raise = up ? 1 : 0;
         const active = game.state === "round" && game.active && game.active.arm === side;
         const k = active ? clamp((now - game.active.since) / game.session.windowMs, 0, 1) : 0;
@@ -1211,13 +1378,60 @@
         ctx.fillText(bound() ? "ROBOT ARMS ALIGNED · ADJUST in the menu to redo" : "Robot arms found · ADJUST in the menu to line up", W / 2, y);
       };
 
-      if (game.state === "menu") {
+      if (game.state === "rhythm" || game.state === "rhythmDone") {
+        const r = rhythm, map = r.song.map;
+        const done = game.state === "rhythmDone";
+        const total = r.perfect + r.good + r.miss;
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(`♪ ${map.title}`.slice(0, 50), W / 2, 70);
+        ctx.font = font(done ? 64 : 150);
+        ctx.fillStyle = done ? "#ffd60a" : "#fff";
+        ctx.fillText(done ? "SONG COMPLETE" : String(Math.round(r.score)), W / 2, done ? 150 : 215);
+        if (done) {
+          ctx.font = font(140);
+          ctx.fillStyle = "#fff";
+          ctx.fillText(String(Math.round(r.score)), W / 2, 290);
+        }
+        const stats = [["PERFECT", r.perfect], ["GOOD", r.good], ["MISS", r.miss], [done ? "BEST COMBO" : "COMBO", done ? r.bestCombo : r.combo]];
+        stats.forEach(([k, v], i) => {
+          const x = 140 + i * 248;
+          ctx.font = "600 26px system-ui";
+          ctx.fillStyle = "#aaa";
+          ctx.fillText(k, x, 360);
+          ctx.font = font(56);
+          ctx.fillStyle = "#fff";
+          ctx.fillText(String(v), x, 420);
+        });
+        if (done) {
+          ctx.font = "600 34px system-ui";
+          ctx.fillStyle = "#9fd8ff";
+          ctx.fillText(`${total ? Math.round((100 * (r.perfect + r.good)) / total) : 0}% on the beat`, W / 2, 490);
+          ctx.font = "500 30px system-ui";
+          ctx.fillStyle = "#ddd";
+          ctx.fillText("Pinch right to play again · hold a left pinch for the menu", W / 2, H - 46);
+        } else {
+          const k = clamp(songMs() / (map.durationMs || 1), 0, 1);
+          rr(ctx, 112, 470, W - 224, 18, 9);
+          ctx.fillStyle = "#333";
+          ctx.fill();
+          rr(ctx, 112, 470, Math.max(18, (W - 224) * k), 18, 9);
+          ctx.fillStyle = "#ffd60a";
+          ctx.fill();
+          ctx.font = "500 28px system-ui";
+          ctx.fillStyle = "#aaa";
+          ctx.fillText("Punch each pad as its circle closes · hold a left pinch to stop", W / 2, H - 46);
+        }
+      } else if (game.state === "menu") {
         ctx.font = font(104);
         ctx.fillText("WAX ON WAX OFF", W / 2, 150);
         ctx.font = "500 38px system-ui";
         ctx.fillStyle = "#ddd";
-        ctx.fillText("Your sparring coach is ready.", W / 2, 250);
-        ctx.fillText("Poke START to fight, ADJUST to line him up.", W / 2, 305);
+        ctx.fillText("Your sparring coach is ready.", W / 2, 240);
+        ctx.font = "500 30px system-ui";
+        ctx.fillText("PLAY: reaction rounds · RHYTHM: punch to your music", W / 2, 295);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fillText(rhythm.song ? `♪ ${rhythm.song.map.title}`.slice(0, 50) : "No song: import one on the page before entering", W / 2, 340);
         ctx.font = "600 30px system-ui";
         ctx.fillStyle = bound() ? "#7dffb0" : realLive() ? "#ffd60a" : "#aaa";
         ctx.fillText(bound() ? "LINED UP WITH THE ROBOT ARMS" : realLive() ? "ROBOT ARMS FOUND: press ADJUST to line up" : "No robot arms: ADJUST places the coach by gaze", W / 2, 400);
@@ -1398,6 +1612,7 @@
       if (game.state === "setup" || !trainer.root.visible) placeTrainer(viewerPos, viewerDir);
       for (const h of Object.values(hands)) if (h.obj) updateHand(h, perfNow, dt);
       updateMenu(perfNow);
+      updateRhythm(perfNow);
       if (game.state === "calib") updateCalibration(perfNow);
       else updateGame();
       animateTrainer(perfNow, dt, viewerPos);
