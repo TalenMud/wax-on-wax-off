@@ -832,9 +832,45 @@
       game.state = "calib";
       game.notice = "";
     }
+    // Only one arm streaming (the other unplugged or faulty): one touch on its pad, either glove.
+    const liveArms = () => (realLive() ? ["left", "right"].filter((a) => real.arms[a]) : []);
+    function updateSingleCalibration(now, arm) {
+      const h = Object.values(hands).find((x) => x.glove.group.visible && x.speed < 0.08);
+      if (!h) {
+        calib.stillSince = 0;
+        return;
+      }
+      if (!calib.stillSince) calib.stillSince = now;
+      if (now - calib.stillSince < CAL_STILL_MS) return;
+      const w = h.glove.group.localToWorld(new THREE.Vector3(0, 0, -0.085));
+      const a = real.arms[arm];
+      const P = rigToThree(rigPoint(arm, a.p.map((v, i) => v + a.n[i] * FIST_R)));
+      // Heading: the rig faces the player (rig +x, three -z, points from the pad to the head).
+      const f = tmp().subVectors(viewerPos, w).setY(0).normalize();
+      const yaw = Math.atan2(-f.x, -f.z);
+      const t = w.clone().sub(P.clone().applyAxisAngle(Y_UP, yaw));
+      // Which of the player's sides the pad is on decides which virtual pad it drives.
+      const right = tmp().crossVectors(tmp().copy(viewerDir).setY(0).normalize(), Y_UP);
+      const side = tmp().subVectors(w, viewerPos).dot(right) < 0 ? "left" : "right";
+      const other = arm === "left" ? "right" : "left";
+      rigCal = { yaw, t: t.toArray(), arm: side === "left" ? { left: arm, right: other } : { left: other, right: arm },
+                 spacing: rigSpacing() };
+      try { localStorage.setItem("wax.rigcal", JSON.stringify(rigCal)); } catch {}
+      sfx.beep(true);
+      game.notice = `Aligned with the ${arm} arm only (the pad on your ${side})`;
+      openMenu(performance.now());
+      placeTrainer(viewerPos, viewerDir);
+      sfx.cheer();
+    }
+
     function updateCalibration(now) {
+      const live = liveArms();
+      if (live.length === 1) {
+        updateSingleCalibration(now, live[0]);
+        return;
+      }
       const h = hands[calib.side];
-      if (!(h && h.glove.group.visible && h.speed < 0.08 && realLive() && real.arms.left && real.arms.right)) {
+      if (!(h && h.glove.group.visible && h.speed < 0.08 && live.length === 2)) {
         calib.stillSince = 0;
         return;
       }
@@ -1502,7 +1538,8 @@
         ctx.fillText("ALIGN WITH THE ARMS", W / 2, 130);
         ctx.font = "500 40px system-ui";
         ctx.fillStyle = "#ddd";
-        ctx.fillText(`Rest your ${calib.side.toUpperCase()} glove on the pad on your ${calib.side}`, W / 2, 240);
+        const single = liveArms().length === 1;
+        ctx.fillText(single ? "Rest a glove on the robot pad" : `Rest your ${calib.side.toUpperCase()} glove on the pad on your ${calib.side}`, W / 2, 240);
         ctx.fillText("and hold still", W / 2, 295);
         const k = calib.stillSince ? clamp((performance.now() - calib.stillSince) / CAL_STILL_MS, 0, 1) : 0;
         rr(ctx, W / 2 - 250, 350, 500, 36, 18);
@@ -1511,10 +1548,10 @@
         rr(ctx, W / 2 - 250, 350, Math.max(36, 500 * k), 36, 18);
         ctx.fillStyle = "#ffd60a";
         ctx.fill();
-        const both = realLive() && real.arms.left && real.arms.right;
+        const both = liveArms().length === 2;
         ctx.font = "600 30px system-ui";
         ctx.fillStyle = both ? "#7dffb0" : "#ff9f9f";
-        ctx.fillText(both ? "BOTH ARMS STREAMING" : "WAITING FOR BOTH ARMS (pad_stream.py)", W / 2, H - 46);
+        ctx.fillText(both ? "BOTH ARMS STREAMING" : single ? `ONE ARM STREAMING (${liveArms()[0]})` : "WAITING FOR THE ARMS (pad_stream.py)", W / 2, H - 46);
       } else if (game.state === "setup") {
         ctx.font = font(84);
         ctx.fillText("PLACE YOUR TRAINER", W / 2, 140);
