@@ -9,6 +9,7 @@ ever move between these fixed points, and dodges only move the pad back, away fr
     python -m brain.arm.dodge plan                    # print the computed poses; no hardware
     python -m brain.arm.dodge read                    # read-only: joints and pad positions now
     python -m brain.arm.dodge nudge --arms left --joint wrist_roll --delta 5   # TORQUE ON: one joint
+    python -m brain.arm.dodge pose --arms left --pose bait0 --hold 3   # TORQUE ON: there and back
     python -m brain.arm.dodge live --arms left        # TORQUE ON: asks you to type "go" first
 
 Live safety: the commanded pose moves towards its goal at --speed deg/s, and max_relative_target
@@ -198,6 +199,44 @@ def cmd_nudge(args) -> None:
         print("torque off")
 
 
+def cmd_pose(args) -> None:
+    """Visit one planned pose (bait0..2 / dodge0..2) and come back to the start, then torque off."""
+    side = args.arms[0]
+    kind, idx = args.pose[:-1], int(args.pose[-1])
+    goal = arm_poses(Chain(), side)[kind][idx]
+    print(f"{side} arm: torque on, all joints ramp at {args.speed:.0f} deg/s to {args.pose} {goal},")
+    print(f"hold {args.hold:.0f} s, ramp back to where it started, torque off. Someone must be at the arm power.")
+    if input('Type "go" to enable torque: ').strip() != "go":
+        print("Not started.")
+        return
+    arm = Arm(side, args.speed)
+    stopping = False
+
+    def on_signal(*_):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+    try:
+        arm.connect()
+        start = dict(arm.target)
+        for name, pose in (("goal", goal), ("start", start)):
+            while not stopping and not arm.move_towards(pose):
+                time.sleep(1 / HZ)
+            end = time.monotonic() + (args.hold if name == "goal" else 1.0)
+            while not stopping and time.monotonic() < end:
+                arm.move_towards(pose)
+                time.sleep(1 / HZ)
+            obs = arm.robot.get_observation()
+            print(f"  at {name}: " + ", ".join(f"{m} {obs[m + '.pos']:.1f}/{pose[m]:.1f}" for m in MOTORS))
+            if stopping:
+                break
+    finally:
+        arm.stop()
+        print("torque off")
+
+
 def cmd_live(args) -> None:
     chain = Chain()
     print(f"Arms {args.arms} will enable torque and move to bait pose 0 at most {args.speed:.0f} deg/s,")
@@ -257,15 +296,17 @@ def cmd_live(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["plan", "read", "nudge", "live"])
+    ap.add_argument("cmd", choices=["plan", "read", "nudge", "pose", "live"])
     ap.add_argument("--arms", nargs="+", choices=["left", "right"], default=["left", "right"])
     ap.add_argument("--speed", type=float, default=30.0, help="max joint speed, deg/s (start slow)")
     ap.add_argument("--joint", choices=list(MOTORS), default="wrist_roll", help="nudge: which joint")
     ap.add_argument("--delta", type=float, default=5.0, help="nudge: degrees (at most 10)")
+    ap.add_argument("--pose", default="bait0", choices=[f"{k}{i}" for k in ("bait", "dodge") for i in range(3)])
+    ap.add_argument("--hold", type=float, default=3.0, help="pose: seconds to hold it")
     args = ap.parse_args()
     if abs(args.delta) > 10:
         ap.error("--delta is capped at 10 degrees")
-    {"plan": cmd_plan, "read": cmd_read, "nudge": cmd_nudge, "live": cmd_live}[args.cmd](args)
+    {"plan": cmd_plan, "read": cmd_read, "nudge": cmd_nudge, "pose": cmd_pose, "live": cmd_live}[args.cmd](args)
 
 
 if __name__ == "__main__":
