@@ -38,6 +38,11 @@ UDP_PORT = 9310
 WATCHDOG_S = 0.5
 HZ = 50
 MAX_LEAD_DEG = 10.0  # max_relative_target: a command never leads the real joint by more than this
+# Gravity sag: the Lab's soft gains hold an outstretched arm a few degrees low. While a pose is
+# held, each joint's command is trimmed towards cancelling the measured error (no gain changes),
+# capped at TRIM_MAX_DEG, and remembered per pose in TRIM_FILE for the next visit.
+TRIM_RATE, TRIM_MAX_DEG = 0.04, 8.0
+TRIM_FILE = Path.home() / ".config" / "wax-on-wax-off" / "arm_trim.json"
 
 # Pad targets in each arm's frame (metres). Bait spots spread a little so the player can't
 # pre-aim; the dodge pulls the pad 15 cm back and 8 cm down from wherever it is.
@@ -124,6 +129,10 @@ class Arm:
         self.step = speed_deg_s / HZ
         self.robot = MetalFollower(cfg)
         self.poses: dict = {}
+        try:
+            self.trim: dict[str, dict[str, float]] = json.loads(TRIM_FILE.read_text()).get(side, {})
+        except (OSError, ValueError):
+            self.trim = {}
         self.target: dict[str, float] = {}
         self.state, self.bait_i, self.until = "bait", 0, 0.0
 
@@ -134,11 +143,13 @@ class Arm:
         self.target = {m: now[f"{m}.pos"] for m in MOTORS}
         self.cmd = dict(self.target)  # where we are commanding each joint right now
 
-    def move_towards(self, goal: dict[str, float]) -> bool:
-        """One tick: step the command at most self.step deg per joint towards goal. True when there."""
+    def move_towards(self, goal: dict[str, float], key: str | None = None) -> bool:
+        """One tick: step the command at most self.step deg per joint towards goal (plus its
+        learned sag trim, if key names the pose). True when the command has arrived."""
+        trim = self.trim.get(key, {}) if key else {}
         done = True
         for m in MOTORS:
-            d = goal[m] - self.cmd[m]
+            d = goal[m] + trim.get(m, 0.0) - self.cmd[m]
             if abs(d) > self.step:
                 d, done = math.copysign(self.step, d), False
             self.cmd[m] += d
@@ -147,11 +158,31 @@ class Arm:
         self.robot.send_action(action)
         return done
 
+    def learn_trim(self, goal: dict[str, float], key: str) -> dict[str, float]:
+        """While holding goal: nudge its trim against the measured sag. Returns the errors (deg)."""
+        obs = self.robot.get_observation()
+        trim = self.trim.setdefault(key, {m: 0.0 for m in MOTORS})
+        errs = {}
+        for m in MOTORS:
+            errs[m] = goal[m] - obs[f"{m}.pos"]
+            trim[m] = max(-TRIM_MAX_DEG, min(TRIM_MAX_DEG, trim.get(m, 0.0) + TRIM_RATE * errs[m]))
+        return errs
+
+    def save_trim(self) -> None:
+        try:
+            data = json.loads(TRIM_FILE.read_text())
+        except (OSError, ValueError):
+            data = {}
+        data[self.side] = {k: {m: round(v, 2) for m, v in t.items()} for k, t in self.trim.items()}
+        TRIM_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TRIM_FILE.write_text(json.dumps(data, indent=1))
+
     def tick(self, now: float) -> None:
         if self.state == "dodge" and now >= self.until:
             self.state = "bait"
             self.bait_i = random.randrange(len(self.poses["bait"]))
-        self.move_towards(self.poses["dodge" if self.state == "dodge" else "bait"][self.bait_i])
+        kind = "dodge" if self.state == "dodge" else "bait"
+        self.move_towards(self.poses[kind][self.bait_i], f"{kind}{self.bait_i}")
 
     def threat(self, now: float) -> None:
         if self.state != "dodge":
@@ -200,12 +231,15 @@ def cmd_nudge(args) -> None:
 
 
 def cmd_pose(args) -> None:
-    """Visit one planned pose (bait0..2 / dodge0..2) and come back to the start, then torque off."""
+    """Visit planned poses in order (e.g. bait0,dodge0,bait0), holding each and learning its sag
+    trim, then come back to the start and turn torque off."""
     side = args.arms[0]
-    kind, idx = args.pose[:-1], int(args.pose[-1])
-    goal = arm_poses(Chain(), side)[kind][idx]
-    print(f"{side} arm: torque on, all joints ramp at {args.speed:.0f} deg/s to {args.pose} {goal},")
-    print(f"hold {args.hold:.0f} s, ramp back to where it started, torque off. Someone must be at the arm power.")
+    planned = arm_poses(Chain(), side)
+    seq = [(name, planned[name[:-1]][int(name[-1])]) for name in args.pose.split(",")]
+    print(f"{side} arm: torque on, all joints ramp at {args.speed:.0f} deg/s through {[n for n, _ in seq]},")
+    print(f"holding each {args.hold:.0f} s, then back to where it started, torque off. Someone must be at the arm power.")
+    for name, pose in seq:
+        print(f"  {name}: {pose}")
     if input('Type "go" to enable torque: ').strip() != "go":
         print("Not started.")
         return
@@ -220,20 +254,31 @@ def cmd_pose(args) -> None:
     signal.signal(signal.SIGTERM, on_signal)
     try:
         arm.connect()
-        start = dict(arm.target)
-        for name, pose in (("goal", goal), ("start", start)):
-            while not stopping and not arm.move_towards(pose):
+        seq.append(("start", dict(arm.target)))
+        for name, pose in seq:
+            key = None if name == "start" else name
+            t0 = time.monotonic()
+            while not stopping and not arm.move_towards(pose, key):
                 time.sleep(1 / HZ)
-            end = time.monotonic() + (args.hold if name == "goal" else 1.0)
+            travel = time.monotonic() - t0
+            end = time.monotonic() + (args.hold if key else 1.0)
+            errs = {}
             while not stopping and time.monotonic() < end:
-                arm.move_towards(pose)
+                arm.move_towards(pose, key)
+                if key and time.monotonic() > end - args.hold + 0.5:  # let it settle first
+                    errs = arm.learn_trim(pose, key)
                 time.sleep(1 / HZ)
             obs = arm.robot.get_observation()
-            print(f"  at {name}: " + ", ".join(f"{m} {obs[m + '.pos']:.1f}/{pose[m]:.1f}" for m in MOTORS))
+            print(f"  at {name} after {travel:.1f} s: " + ", ".join(f"{m} {obs[m + '.pos']:.1f}/{pose[m]:.1f}" for m in MOTORS))
+            if key:
+                q = deg_to_q({m: obs[f"{m}.pos"] for m in MOTORS})
+                p, n = Chain().pad(q)
+                print(f"    pad {np.round(p, 3)} normal {np.round(n, 2)}; trim now " + ", ".join(f"{m} {v:+.1f}" for m, v in arm.trim[key].items() if abs(v) >= 0.3))
             if stopping:
                 break
     finally:
         arm.stop()
+        arm.save_trim()
         print("torque off")
 
 
@@ -291,6 +336,7 @@ def cmd_live(args) -> None:
     finally:
         for arm in arms.values():
             arm.stop()
+            arm.save_trim()
         print("torque off")
 
 
@@ -301,9 +347,12 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=30.0, help="max joint speed, deg/s (start slow)")
     ap.add_argument("--joint", choices=list(MOTORS), default="wrist_roll", help="nudge: which joint")
     ap.add_argument("--delta", type=float, default=5.0, help="nudge: degrees (at most 10)")
-    ap.add_argument("--pose", default="bait0", choices=[f"{k}{i}" for k in ("bait", "dodge") for i in range(3)])
+    ap.add_argument("--pose", default="bait0", help="pose: comma list of bait0..2 / dodge0..2")
     ap.add_argument("--hold", type=float, default=3.0, help="pose: seconds to hold it")
     args = ap.parse_args()
+    names = {f"{k}{i}" for k in ("bait", "dodge") for i in range(3)}
+    if any(n not in names for n in args.pose.split(",")):
+        ap.error(f"--pose takes a comma list of {sorted(names)}")
     if abs(args.delta) > 10:
         ap.error("--delta is capped at 10 degrees")
     {"plan": cmd_plan, "read": cmd_read, "nudge": cmd_nudge, "pose": cmd_pose, "live": cmd_live}[args.cmd](args)
