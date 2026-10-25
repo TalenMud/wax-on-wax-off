@@ -114,19 +114,40 @@ class ArmLink:
     def __init__(self, host: str | None, port: int = 9310) -> None:
         # host may be IPv4 or IPv6 link-local with a scope (fe80::...%enx...), the direct cable's
         # address whatever the GX10's IPv4 settings are.
+        self.host, self.port = host, port
         self.addr = None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        if host:
-            family, _, _, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
-            self.addr = addr
-            self.sock = socket.socket(family, socket.SOCK_DGRAM)
+        self.error = ""
+        self._resolve()
+
+    def _resolve(self) -> None:
+        """Look the address up again: a re-plugged USB adapter gets a new interface index, and the
+        old link-local scope would stay "unreachable" forever (and the arms' watchdog drop torque)."""
+        if not self.host:
+            return
+        try:
+            family, _, _, _, addr = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_DGRAM)[0]
+        except OSError:
+            return  # adapter not plugged in yet; try again on the next send
+        self.sock.close()
+        self.sock = socket.socket(family, socket.SOCK_DGRAM)
+        self.addr = addr
 
     def send(self, msg: dict) -> None:
-        if self.addr:
-            try:
-                self.sock.sendto(json.dumps(msg).encode(), self.addr)
-            except OSError as e:
-                print(f"arm link: {e}")
+        if not self.host:
+            return
+        try:
+            if self.addr is None:
+                raise OSError("no route to the arms' machine yet")
+            self.sock.sendto(json.dumps(msg).encode(), self.addr)
+            if self.error:
+                print("arm link: back")
+                self.error = ""
+        except OSError as e:
+            if str(e) != self.error:  # say it once, not 20 times a second
+                print(f"arm link: {e}; retrying")
+                self.error = str(e)
+            self._resolve()
 
     def heartbeat(self) -> None:
         while True:
