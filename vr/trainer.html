@@ -885,6 +885,7 @@
     // a pad over APPROACH_MS; punch it as the circle closes, on the beat.
     const APPROACH_MS = 1100;
     const PERFECT_MS = 70, GOOD_MS = 150;
+    const FADE_MS = 2500;   // the song fades out over the end of the round
     const rhythm = { song: null, buffer: null, bufferUrl: null, src: null, startAt: 0, notes: [], done: false,
                      score: 0, combo: 0, bestCombo: 0, perfect: 0, good: 0, miss: 0 };
     const songEl = document.getElementById("song");
@@ -947,7 +948,9 @@
       }
       const src = actx.createBufferSource();
       src.buffer = rhythm.buffer;
-      src.connect(master);
+      rhythm.gain = actx.createGain();   // per song, so the end of the round can fade it out
+      src.connect(rhythm.gain).connect(master);
+      rhythm.fading = false;
       rhythm.startAt = actx.currentTime + 1.5;
       src.start(rhythm.startAt);
       src.onended = () => { if (rhythm.src === src) rhythm.done = true; };
@@ -1018,8 +1021,14 @@
         n.ring.material.opacity = Math.min(1, (1 - k) * 2.5);
         n.ring.material.color.setHSL(0.15, 1, 0.5 + 0.5 * Math.max(0, k));   // white -> yellow as it closes
       }
-      const last = rhythm.notes[rhythm.notes.length - 1];
-      if (rhythm.done || (last && t > last.t + 2500)) {
+      // The round ends at the beatmap's durationMs (tools/make_beatmap.py --end), fading the song out.
+      const end = rhythm.song.map.durationMs || Infinity;
+      if (!rhythm.fading && t > end - FADE_MS) {
+        rhythm.fading = true;
+        rhythm.gain.gain.setValueAtTime(1, actx.currentTime);
+        rhythm.gain.gain.linearRampToValueAtTime(0, actx.currentTime + Math.max(0.1, (end - t) / 1000));
+      }
+      if (rhythm.done || t > end) {
         stopRhythm();
         game.state = "rhythmDone";
         game.actionAt = perfNow + 1500;

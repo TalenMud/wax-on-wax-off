@@ -2,6 +2,7 @@
 
     python3 tools/make_beatmap.py ~/Music/song.mp3                  # a pad every other beat
     python3 tools/make_beatmap.py ~/Music/song.mp3 --every 1 --title "Song"
+    python3 tools/make_beatmap.py ~/Music/song.mp3 --end 90     # a 90-second round
 
 Copies the audio to vr/music/ next to its beatmap (<name>.json) and lists both in
 vr/music/library.json, which vr/trainer.html reads. vr/music/ is gitignored: music you own stays
@@ -92,6 +93,7 @@ def main() -> None:
     ap.add_argument("--title")
     ap.add_argument("--every", type=int, default=2, help="a pad every N beats (1 = every beat)")
     ap.add_argument("--start", type=float, default=4.0, help="seconds of intro before the first pad")
+    ap.add_argument("--end", type=float, help="end the round here, in seconds (the music fades out)")
     args = ap.parse_args()
 
     x = decode(args.audio)
@@ -99,6 +101,8 @@ def main() -> None:
     bpm, offset = refine(env, tempo(env))
     offset += ONSET_LAG_S
     duration = len(x) / SR
+    if args.end:
+        duration = min(duration, args.end)
     beat = 60.0 / bpm
     fps = SR / HOP
     loud = np.convolve(env, np.ones(int(fps)) / int(fps), mode="same")  # ~1 s of onset energy
