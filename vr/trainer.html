@@ -48,7 +48,7 @@
     const rating = (ms) => ms < 400 ? ["LIGHTNING", "#7dffb0"] : ms < 600 ? ["SHARP", "#9fd8ff"] : ms < 800 ? ["SOLID", "#ffe08a"] : ["SLOW", "#ffb38a"];
 
     const GLOVE_R = 0.06;
-    const PAD_R = 0.11;
+    const PAD_R = 0.03;              // real pads are round, 5-6 cm across
     const HIT_MIN_APPROACH = 0.8;   // m/s toward the pad face
     const HIT_DEBOUNCE_MS = 250;
     const MAX_HAND_SPEED = 15;      // faster than this between frames is a tracking glitch
