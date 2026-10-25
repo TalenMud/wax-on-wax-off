@@ -7,6 +7,8 @@ import { createSession, displayName, LINK_CODE_TTL_MS, linkedPlayer, newLinkCode
 import { armV, difficultyV, modeV } from "./schema";
 
 const HEARTBEAT_WRITE_MS = 2000;
+const AUDIENCE_CODE_TTL_MS = 12 * 60 * 60_000;
+const REACTIONS_WINDOW_MS = 5000;
 
 export const poll = internalMutation({
   args: {},
@@ -24,7 +26,18 @@ export const poll = internalMutation({
       await ctx.db.patch(rig._id, { linkCode, linkCodeAt: now });
       rig = { ...rig, linkCode, linkCodeAt: now };
     }
+    if (!rig.audienceCode || now - (rig.audienceCodeAt ?? 0) > AUDIENCE_CODE_TTL_MS) {
+      const audienceCode = newLinkCode();
+      await ctx.db.patch(rig._id, { audienceCode, audienceCodeAt: now });
+      rig = { ...rig, audienceCode, audienceCodeAt: now };
+    }
     const playerId = linkedPlayer(rig, now);
+
+    // The last few seconds of audience emoji (the hub de-duplicates by id); older ones are dropped.
+    const reactions = await ctx.db.query("reactions").withIndex("by_at", (q) => q.gt("at", now - REACTIONS_WINDOW_MS)).take(60);
+    for (const old of await ctx.db.query("reactions").withIndex("by_at", (q) => q.lt("at", now - 60_000)).take(25)) {
+      await ctx.db.delete(old._id);
+    }
 
     const live = await ctx.db.query("sessions").withIndex("by_status", (q) => q.eq("status", "live")).collect();
     const s = live.find((x) => !x.simulated);
@@ -46,6 +59,8 @@ export const poll = internalMutation({
       session,
       linkCode: rig.linkCode,
       player: playerId ? await displayName(ctx, playerId) : null,
+      audienceCode: rig.audienceCode,
+      reactions: reactions.map((r) => ({ id: r._id, emoji: r.emoji, at: r.at })),
     };
   },
 });

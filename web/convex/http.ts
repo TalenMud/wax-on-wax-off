@@ -60,4 +60,15 @@ http.route({
   }),
 });
 
+// The trash-talking coach's material: this round, the player's history and rank, the crowd.
+http.route({
+  path: "/hub/coach",
+  method: "GET",
+  handler: httpAction(async (ctx, req) => {
+    const denied = authorized(req);
+    if (denied) return denied;
+    return Response.json(await ctx.runQuery(internal.coach.context, {}));
+  }),
+});
+
 export default http;

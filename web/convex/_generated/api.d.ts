@@ -8,7 +8,9 @@
  * @module
  */
 
+import type * as audience from "../audience.js";
 import type * as auth from "../auth.js";
+import type * as coach from "../coach.js";
 import type * as game from "../game.js";
 import type * as http from "../http.js";
 import type * as hub from "../hub.js";
@@ -23,7 +25,9 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  audience: typeof audience;
   auth: typeof auth;
+  coach: typeof coach;
   game: typeof game;
   http: typeof http;
   hub: typeof hub;

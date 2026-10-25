@@ -6,10 +6,15 @@
 With HUB_SECRET set, or saved in ~/.config/wax-on-wax-off/hub_secret (and optionally CONVEX_SITE_URL), the server polls the phone app's Convex
 backend through brain/convex_bridge.py and the headset plays the rig's part:
 
-    GET  /rig/state   {online, error, estop, now, session, linkCode, player}  times are this laptop's epoch ms
+    GET  /rig/state   {online, error, estop, now, session, linkCode, player, audienceCode, reactions}
+                      times are this laptop's epoch ms; reactions: [{id, emoji, at}] audience emoji, last ~5 s
     POST /rig/event   {sessionId, kind: present|hit|miss, arm: left|right, reactionMs?} -> {accepted}
     POST /rig/start   {mode, difficulty} -> {ok, sessionId} or {ok: false, error}  for the linked player
     POST /rig/threat  {arm: left|right} -> 204   forwarded to brain/arm/dodge.py (--arm-host)
+    POST /coach/say   {event: start|miss|slow|hit|streak|crowd|end, ms?} -> audio/mpeg (X-Coach-Line: the text),
+                      a line from the player's Convex stats spoken by ElevenLabs; 204 if none (tools/coach_voice.py)
+    GET  /rig/pads    {ageMs, left, right}  the real pads from brain/arm/pad_stream.py (udp 9311), each
+                      {p, n} in its arm's base frame or null; ageMs null until the first packet
 
 With --arm-host, a 20 Hz UDP heartbeat keeps brain/arm/dodge.py's watchdog fed; stopping this
 server stops the heartbeat, which turns the arms' torque off within half a second.
@@ -32,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from brain.convex_bridge import ConvexBridge  # noqa: E402
+from coach_voice import Coach  # noqa: E402  (tools/, next to this file)
 
 LOG = ROOT / "logs" / f"xr-{time.strftime('%Y%m%d')}.jsonl"
 DEFAULT_SITE = "https://abundant-roadrunner-265.convex.site"
@@ -45,7 +51,8 @@ class Rig:
     def __init__(self, bridge: ConvexBridge | None) -> None:
         self.bridge = bridge
         self.lock = threading.Lock()
-        self.state = {"online": False, "error": "HUB_SECRET not set" if bridge is None else "connecting", "estop": False, "session": None, "linkCode": None, "player": None}
+        self.state = {"online": False, "error": "HUB_SECRET not set" if bridge is None else "connecting", "estop": False, "session": None,
+                      "linkCode": None, "player": None, "audienceCode": None, "reactions": []}
 
     def run(self) -> None:
         while True:
@@ -65,9 +72,10 @@ class Rig:
                         "gapMs": s.gap_ms,
                     }
                 new = {"online": True, "error": None, "estop": estop, "session": session,
-                       "linkCode": self.bridge.link_code, "player": self.bridge.player}
+                       "linkCode": self.bridge.link_code, "player": self.bridge.player,
+                       "audienceCode": self.bridge.audience_code, "reactions": self.bridge.reactions}
             except Exception as e:  # network blips must not kill the poller
-                new = {**self.state, "online": False, "error": str(e), "session": None}
+                new = {**self.state, "online": False, "error": str(e), "session": None, "reactions": []}
             with self.lock:
                 if any(new[k] != self.state[k] for k in ("session", "online", "player")):
                     print(f"rig: online={new['online']} estop={new['estop']} player={new['player']} session={new['session'] and new['session']['id']} {new['error'] or ''}")
@@ -116,8 +124,34 @@ class ArmLink:
             time.sleep(0.05)
 
 
+class Pads:
+    """Latest packet from brain/arm/pad_stream.py, which multicasts on the wired link to the GX10."""
+
+    def __init__(self, port: int = 9311) -> None:
+        self.sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        self.sock.bind(("::", port))
+        self.last: dict = {}
+        self.at = 0.0
+
+    def run(self) -> None:
+        while True:
+            data, _ = self.sock.recvfrom(4096)
+            try:
+                msg = json.loads(data)
+            except ValueError:
+                continue
+            if msg.get("t") == "pads":
+                self.last, self.at = msg, time.monotonic()
+
+    def snapshot(self) -> dict:
+        age = round((time.monotonic() - self.at) * 1000) if self.at else None
+        return {"ageMs": age, "left": self.last.get("left"), "right": self.last.get("right")}
+
+
 class Handler(SimpleHTTPRequestHandler):
     rig: Rig
+    pads: Pads
+    coach: Coach
     arm: ArmLink
 
     def _json(self, code: int, obj: dict) -> None:
@@ -138,6 +172,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/rig/state":
             self._json(200, self.rig.snapshot())
+            return
+        if self.path == "/rig/pads":
+            self._json(200, self.pads.snapshot())
             return
         super().do_GET()
 
@@ -164,6 +201,28 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             print(f"rig event {body['kind']} {body['arm']} {body.get('reactionMs', '')} -> {accepted}")
             self._json(200, {"accepted": accepted})
+        elif self.path == "/coach/say":
+            body = self._body()
+            if body is None:
+                self.send_error(400)
+                return
+            try:
+                said = self.coach.say(str(body.get("event", "")), body.get("ms"))
+            except Exception as e:  # a voice hiccup must not break the game
+                print(f"coach: {e}")
+                said = None
+            if not said:
+                self.send_response(204)
+                self.end_headers()
+                return
+            text, mp3 = said
+            print(f"coach [{body.get('event')}]: {text}")
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(mp3)))
+            self.send_header("X-Coach-Line", text.encode("ascii", "replace").decode())
+            self.end_headers()
+            self.wfile.write(mp3)
         elif self.path == "/rig/threat":
             body = self._body()
             if body is None or body.get("arm") not in ("left", "right"):
@@ -209,6 +268,11 @@ def main() -> None:
     if a.arm_host:
         threading.Thread(target=Handler.arm.heartbeat, daemon=True).start()
         print(f"arms: heartbeat + threats -> udp {a.arm_host}:9310")
+
+    Handler.coach = Coach(bridge)
+    print(f"coach voice: {'ElevenLabs' if Handler.coach.key else 'off (no ElevenLabs key)'}")
+    Handler.pads = Pads()
+    threading.Thread(target=Handler.pads.run, daemon=True).start()
 
     server = ThreadingHTTPServer(("0.0.0.0", a.port), partial(Handler, directory=str(ROOT)))
     print(f"serving {ROOT} on :{a.port}, stats -> {LOG}")

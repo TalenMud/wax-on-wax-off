@@ -1118,3 +1118,79 @@ button:disabled {
     opacity: 0;
   }
 }
+
+/* ---------------------------------------------------------------- audience (/audience) */
+.audience {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: calc(24px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
+  max-width: 520px;
+  margin: 0 auto;
+  overflow: hidden;
+}
+.audience > .card {
+  width: 100%;
+}
+.audience-ring {
+  text-align: center;
+}
+.audience-label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.audience-player {
+  font-family: var(--display);
+  font-size: 40px;
+  line-height: 1.1;
+  margin: 4px 0;
+}
+.audience-stats {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  color: var(--gold);
+  font-weight: 600;
+}
+.audience-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.audience-emoji {
+  aspect-ratio: 1;
+  font-size: 40px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: transform 0.08s;
+}
+.audience-emoji:active {
+  transform: scale(0.88);
+  background: var(--surface-2);
+}
+.audience-hint {
+  text-align: center;
+}
+.audience-float {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+.audience-float span {
+  position: absolute;
+  bottom: 18%;
+  font-size: 44px;
+  animation: audience-up 1.4s ease-out forwards;
+}
+@keyframes audience-up {
+  from { transform: translateY(0) scale(0.6); opacity: 1; }
+  to { transform: translateY(-55vh) scale(1.3); opacity: 0; }
+}

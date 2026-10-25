@@ -48,3 +48,6 @@ export function reactionRating(ms: number): { label: string; tone: "elite" | "go
 export function bestKey(simulated: boolean, mode: Mode, difficulty: Difficulty) {
   return `${simulated ? "sim" : "rig"}:${mode}:${difficulty}`;
 }
+
+// Reactions the audience page (waxonwaxoff.ink/audience) can send to the headset.
+export const AUDIENCE_EMOJIS = ["🔥", "👏", "🥊", "💪", "😂", "💀", "🤡", "😴"];

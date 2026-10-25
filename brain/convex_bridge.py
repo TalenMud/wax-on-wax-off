@@ -40,6 +40,8 @@ class ConvexBridge:
         self.skew_s = 0.0  # server clock minus local clock
         self.link_code: str | None = None  # shown in the headset; a phone enters it to link
         self.player: str | None = None  # name of the account the headset is linked to
+        self.audience_code: str | None = None
+        self.reactions: list[dict] = []
 
     def _request(self, path: str, body: dict | None = None) -> dict:
         req = urllib.request.Request(
@@ -58,6 +60,8 @@ class ConvexBridge:
         self.skew_s = data["serverNow"] / 1000 - (sent + time.time()) / 2
         self.link_code = data.get("linkCode")
         self.player = data.get("player")
+        self.audience_code = data.get("audienceCode")  # for waxonwaxoff.ink/audience
+        self.reactions = data.get("reactions") or []  # [{id, emoji, at}], the last few seconds
         s = data["session"]
         if s is None:
             return data["estop"], None
@@ -72,6 +76,10 @@ class ConvexBridge:
             max_run=s["maxRun"],
             gap_ms=s["gapMs"],
         )
+
+    def coach_context(self) -> dict:
+        """The trash-talking coach's material: this round, history, rank, crowd (web/convex/coach.ts)."""
+        return self._request("/hub/coach")
 
     def start(self, mode: str, difficulty: str) -> dict:
         """Start a round for the linked player. Returns {ok, sessionId} or {ok: False, error}."""

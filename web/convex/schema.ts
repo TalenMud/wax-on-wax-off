@@ -58,5 +58,18 @@ export default defineSchema({
     linkCodeAt: v.optional(v.number()),
     playerId: v.optional(v.id("users")),
     playerAt: v.optional(v.number()),
+    // The crowd's code for waxonwaxoff.ink/audience: stable for hours, unlike linkCode, which
+    // changes whenever a player links.
+    audienceCode: v.optional(v.string()),
+    audienceCodeAt: v.optional(v.number()),
   }).index("by_name", ["name"]),
+
+  // Emoji the audience sends; the hub relays the last few seconds of them to the headset.
+  reactions: defineTable({
+    emoji: v.string(),
+    client: v.string(),
+    at: v.number(),
+  })
+    .index("by_at", ["at"])
+    .index("by_client", ["client", "at"]),
 });

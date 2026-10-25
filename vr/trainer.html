@@ -48,7 +48,8 @@
     const rating = (ms) => ms < 400 ? ["LIGHTNING", "#7dffb0"] : ms < 600 ? ["SHARP", "#9fd8ff"] : ms < 800 ? ["SOLID", "#ffe08a"] : ["SLOW", "#ffb38a"];
 
     const GLOVE_R = 0.06;
-    const PAD_R = 0.03;              // real pads are round, 5-6 cm across
+    const PAD_R = 0.075;             // real pads are 5-6 cm across; drawn bigger, as passthrough is imperfect
+    const PAD_IDLE = 0xfff0a0;       // pale yellow; the active pad is bright 0xffd60a and pulses
     const HIT_MIN_APPROACH = 0.8;   // m/s toward the pad face
     const HIT_DEBOUNCE_MS = 250;
     const MAX_HAND_SPEED = 15;      // faster than this between frames is a tracking glitch
@@ -65,6 +66,12 @@
     const DODGE_CHANCE = { easy: 0.3, medium: 0.5, hard: 0.75 };
     // Which robot arm holds the pad on the player's left. ?swaparms=1 if the Lab's names are the other way.
     const ROBOT_ARM = new URLSearchParams(location.search).has("swaparms") ? { left: "right", right: "left" } : { left: "left", right: "right" };
+    // Real arms (brain/arm/pad_stream.py -> /rig/pads): after a two-touch alignment the coach stands
+    // behind the rig and its pads sit on the real ones (and the alignment decides which arm is which).
+    const RIG_SPACING = +(new URLSearchParams(location.search).get("spacing") || 0.70);  // arm base to arm base, m
+    const FIST_R = 0.05;            // glove centre to the pad face while touching it
+    const CAL_STILL_MS = 1200;      // hold a glove this long, still, on a pad to capture it
+    const TORSO_BOTTOM = 0.85;      // trainer-local height sunk below the tabletop when bound (torso starts at 0.82)
 
     const statusEl = document.getElementById("status");
     const enterBtn = document.getElementById("enter");
@@ -188,6 +195,7 @@
       shadow.rotation.x = -Math.PI / 2;
       shadow.position.y = 0.003;
       root.add(shadow);
+      const lower = [shadow];   // hidden when the coach rises from behind the real arms' table
 
       for (const x of [-0.09, 0.09]) {
         const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.62, 6), skin);
@@ -195,9 +203,11 @@
         const shoeM = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.17), shoe);
         shoeM.position.set(x, 0.035, 0.03);
         body.add(leg, shoeM);
+        lower.push(leg, shoeM);
       }
       const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.16, 0.2, 8), shorts);
       hips.position.y = 0.74;
+      lower.push(hips);
       const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.16, 0.5, 8), shirt);
       torso.position.y = 1.07;
       const number = new THREE.Mesh(new THREE.CircleGeometry(0.07, 12), flat(0xffffff));
@@ -245,7 +255,7 @@
         arms[side] = arm;
 
         const padGroup = new THREE.Group();
-        const faceMat = flat(0xe8e8e8, { emissive: 0x000000 });
+        const faceMat = flat(PAD_IDLE, { emissive: 0x000000 });
         const face = new THREE.Mesh(new THREE.CylinderGeometry(PAD_R, PAD_R * 0.92, 0.07, 12).rotateX(Math.PI / 2), faceMat);
         const backing = new THREE.Mesh(new THREE.CylinderGeometry(PAD_R * 0.9, PAD_R * 0.7, 0.05, 10).rotateX(Math.PI / 2), flat(0x333344));
         backing.position.z = -0.055;
@@ -261,7 +271,7 @@
 
       root.visible = false;
       scene.add(root);
-      return { root, body, head, mouth, brows, eyes, arms, pads, shoulders, scale: 1, react: null, reactT: 0, mood: 0 };
+      return { root, body, head, mouth, brows, eyes, arms, pads, shoulders, lower, scale: 1, react: null, reactT: 0, mood: 0 };
     })();
 
     const padLayout = { up: {}, down: {} };   // per side, trainer-local positions
@@ -277,6 +287,13 @@
       trainer.root.scale.setScalar(s);
       trainer.root.position.copy(headPos).addScaledVector(dir, TRAINER_DIST).setY(0);
       trainer.root.lookAt(headPos.x, 0, headPos.z);
+      const onRig = bound();
+      if (onRig) {   // aligned with the real arms: a torso rising from the table behind them, between them
+        const behind = rigWorld("left", [-0.3, -rigSpacing() / 2, 0]);   // y = the arms' base, i.e. the tabletop
+        trainer.root.position.copy(behind).setY(behind.y - TORSO_BOTTOM * s);
+        trainer.root.lookAt(headPos.x, trainer.root.position.y, headPos.z);
+      }
+      for (const m of trainer.lower) m.visible = !onRig;
       const padY = (headPos.y - 0.12) / s, padZ = (TRAINER_DIST - PAD_REACH) / s;
       for (const side of ["left", "right"]) {
         const sx = side === "left" ? -1 : 1;
@@ -298,6 +315,7 @@
     }
 
     const Y_AXIS = new THREE.Vector3(0, 1, 0);
+    const Z_AXIS = new THREE.Vector3(0, 0, 1);
     function animateTrainer(now, dt, headPos) {
       const t = now / 1000;
       const b = trainer.body;
@@ -325,11 +343,22 @@
         const p = trainer.pads[side];
         let target = p.raise > 0.5 ? padLayout.up[side] : padLayout.down[side];
         if (!target) continue;
-        // Dodging: the real pad pulls 15 cm back and 8 cm down (dodge.py); the virtual one follows.
-        if (now < p.dodgeUntil) target = tmp().copy(target).add(tmp().set(0, -0.08, -0.15).divideScalar(trainer.scale));
-        const follow = 1 - Math.exp(-dt * 14);
-        p.pos.lerp(target, follow);
-        p.quat.slerp(p.raise > 0.5 ? Q_UP : Q_DOWN, follow);
+        const a = bound() && real.arms[robotArm(side)];
+        if (a) {
+          // The real pad, in the coach's body frame: it dodges because the real one does. Its face turns
+          // to the player (the pad's real facing in the claw isn't modelled; seen edge-on it reads as a stick).
+          const w = rigWorld(robotArm(side), a.p);
+          p.pos.copy(trainer.body.worldToLocal(w.clone()));
+          const n = tmp().subVectors(headPos, w)
+            .applyQuaternion(trainer.body.getWorldQuaternion(new THREE.Quaternion()).invert());
+          p.quat.setFromUnitVectors(Z_AXIS, n.normalize());
+        } else {
+          // Dodging: the real pad pulls 15 cm back and 8 cm down (dodge.py); the virtual one follows.
+          if (now < p.dodgeUntil) target = tmp().copy(target).add(tmp().set(0, -0.08, -0.15).divideScalar(trainer.scale));
+          const follow = 1 - Math.exp(-dt * 14);
+          p.pos.lerp(target, follow);
+          p.quat.slerp(p.raise > 0.5 ? Q_UP : Q_DOWN, follow);
+        }
         p.recoil = Math.max(0, p.recoil - dt * 4);
         p.group.position.copy(p.pos);
         p.group.position.z -= p.recoil * 0.12 / trainer.scale;
@@ -398,6 +427,30 @@
       scene.add(s);
       effects.push({ obj: s, life: 0.9, max: 0.9, kind: "popup" });
     }
+    // Audience emoji (waxonwaxoff.ink/audience) float up beside the coach. One texture per emoji.
+    const emojiTex = {};
+    function crowdEmoji(emoji) {
+      if (!trainer.root.visible) return;
+      if (!emojiTex[emoji]) {
+        const c = document.createElement("canvas");
+        c.width = c.height = 128;
+        const x = c.getContext("2d");
+        x.textAlign = "center";
+        x.textBaseline = "middle";
+        x.font = "100px sans-serif";
+        x.fillText(emoji, 64, 70);
+        emojiTex[emoji] = new THREE.CanvasTexture(c);
+        emojiTex[emoji].colorSpace = THREE.SRGBColorSpace;
+      }
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: emojiTex[emoji], transparent: true, depthTest: false }));
+      s.renderOrder = 19;
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const off = tmp().set(side * (0.35 + Math.random() * 0.35), -0.3 + Math.random() * 0.4, (Math.random() - 0.5) * 0.3);
+      s.position.copy(trainer.head.getWorldPosition(tmp())).add(off.applyQuaternion(trainer.root.quaternion));
+      s.scale.setScalar(0.13);
+      scene.add(s);
+      effects.push({ obj: s, life: 2.2, max: 2.2, kind: "emoji", sway: Math.random() * 6 });
+    }
     function updateEffects(dt) {
       for (let i = effects.length - 1; i >= 0; i--) {
         const e = effects[i];
@@ -415,12 +468,17 @@
         } else if (e.kind === "popup") {
           e.obj.position.y += dt * 0.28;
           e.obj.material.opacity = Math.min(1, k * 2);
+        } else if (e.kind === "emoji") {
+          e.obj.position.y += dt * 0.22;
+          e.obj.position.x += Math.sin(e.life * 4 + e.sway) * dt * 0.05;
+          e.obj.material.opacity = Math.min(1, k * 3);
+          e.obj.scale.setScalar(0.13 * (1 + 0.3 * (1 - k)));
         }
         if (e.life <= 0) {
           if (e.obj) {
             scene.remove(e.obj);
             if (e.kind === "popup") { e.obj.material.map.dispose(); e.obj.material.dispose(); }
-            if (e.kind === "ring") e.obj.material.dispose();
+            if (e.kind === "ring" || e.kind === "emoji") e.obj.material.dispose();
           } else if (e.mat) e.mat.dispose();
           effects.splice(i, 1);
         }
@@ -567,7 +625,7 @@
       p.dodgeUntil = perfNow + DODGE_MS;
       sfx.dodge();
       popup("DODGE!", "#ff9f40", p.group.getWorldPosition(tmp()).add(tmp().set(0, 0.16, 0)), 0.8);
-      fetch("/rig/threat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ arm: ROBOT_ARM[side] }) }).catch(() => {});
+      fetch("/rig/threat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ arm: robotArm(side) }) }).catch(() => {});
     }
 
     function segmentHitsSphere(p0, p1, c, r) {
@@ -579,6 +637,35 @@
 
     // ---------------------------------------------------------------- phone app link (tools/serve_xr.py)
     const rig = { reachable: false, online: false, session: null, error: "connecting", offset: 0, linkCode: null, player: null };
+    // ---------------------------------------------------------------- trash-talking coach (tools/coach_voice.py)
+    // The laptop builds a line from the player's Convex stats and has ElevenLabs speak it.
+    const COACH_GAP_MS = 3500;      // quiet time after each line
+    const SLOW_MS = 700;            // a hit slower than this gets a comment
+    const coach = { busyUntil: 0, speaking: false, crowd: [] };
+    async function coachSay(event, ms, force = false) {
+      const now = performance.now();
+      if (!actx || coach.speaking || (!force && now < coach.busyUntil)) return;
+      coach.speaking = true;
+      coach.busyUntil = now + COACH_GAP_MS;
+      try {
+        const r = await fetch("/coach/say", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event, ms }) });
+        if (r.status !== 200) return;
+        const buf = await actx.decodeAudioData(await r.arrayBuffer());
+        const src = actx.createBufferSource();
+        src.buffer = buf;
+        const g = actx.createGain();
+        g.gain.value = 1.4;
+        src.connect(g).connect(master);
+        src.start();
+        coach.busyUntil = performance.now() + buf.duration * 1000 + COACH_GAP_MS;
+      } catch {
+        // no voice this time; the game carries on
+      } finally {
+        coach.speaking = false;
+      }
+    }
+
+    const seenReactions = new Set();
     async function pollRig() {
       const t0 = Date.now();
       try {
@@ -586,7 +673,21 @@
         const j = await r.json();
         const t1 = Date.now();
         if (t1 - t0 < 300) rig.offset = j.now - (t0 + t1) / 2;   // laptop clock minus headset clock
-        Object.assign(rig, { reachable: true, online: j.online, session: j.session, error: j.error, linkCode: j.linkCode, player: j.player });
+        Object.assign(rig, { reachable: true, online: j.online, session: j.session, error: j.error, linkCode: j.linkCode, player: j.player, audienceCode: j.audienceCode });
+        // Audience emoji: each one once; the ones already there when the page loads are skipped.
+        for (const r of j.reactions || []) {
+          if (seenReactions.has(r.id)) continue;
+          seenReactions.add(r.id);
+          if (rig.reactionsPrimed) {
+            crowdEmoji(r.emoji);
+            coach.crowd.push(performance.now());
+          }
+        }
+        // A burst from the crowd gets the coach's attention.
+        coach.crowd = coach.crowd.filter((t) => performance.now() - t < 6000);
+        if (coach.crowd.length >= 5) { coach.crowd = []; coachSay("crowd"); }
+        rig.reactionsPrimed = true;
+        if (seenReactions.size > 500) seenReactions.clear();
       } catch {
         Object.assign(rig, { reachable: false, online: false, session: null, error: "laptop server unreachable" });
       }
@@ -627,6 +728,90 @@
       }
     }
 
+    // ---------------------------------------------------------------- real arms (brain/arm/pad_stream.py)
+    const real = { at: 0, arms: { left: null, right: null } };   // {p, n} per robot arm, in its base frame
+    async function pollPads() {
+      try {
+        const j = await (await fetch("/rig/pads", { cache: "no-store" })).json();
+        if (j.ageMs !== null && j.ageMs < 300) { real.arms.left = j.left; real.arms.right = j.right; real.at = performance.now(); }
+      } catch {}
+      setTimeout(pollPads, 33);
+    }
+    pollPads();
+    const realLive = () => performance.now() - real.at < 500;
+    const Y_UP = new THREE.Vector3(0, 1, 0);
+    // Rig frame = the left robot arm's base frame (x towards the player, y the robot's left, z up); the
+    // right arm's base is RIG_SPACING along -y with the same axes.
+    const rigToThree = (v) => new THREE.Vector3(-v[1], v[2], -v[0]);
+    const rigSpacing = () => (rigCal && rigCal.spacing) || RIG_SPACING;   // measured by the alignment
+    const rigPoint = (arm, v, spacing = rigSpacing()) => (arm === "right" ? [v[0], v[1] - spacing, v[2]] : v);
+    // world = R_y(yaw) * rigToThree(rig) + t; arm[padSide] = the robot arm holding the pad on the player's padSide.
+    let rigCal = null;
+    try { rigCal = JSON.parse(localStorage.getItem("wax.rigcal")); } catch {}
+    const rigWorld = (arm, v) => rigToThree(rigPoint(arm, v)).applyAxisAngle(Y_UP, rigCal.yaw).add(tmp().fromArray(rigCal.t));
+    const robotArm = (side) => (rigCal ? rigCal.arm[side] : ROBOT_ARM[side]);
+    const bound = () => !!rigCal && realLive();
+
+    // Alignment: the player rests the left glove on the pad on their left, then the right glove on the
+    // right one. Two points plus the known base spacing give the rig's position and heading.
+    const calib = { side: "left", stillSince: 0, touches: {} };
+    function startCalibration() {
+      Object.assign(calib, { side: "left", stillSince: 0, touches: {} });
+      game.state = "calib";
+      game.notice = "";
+    }
+    function updateCalibration(now) {
+      const h = hands[calib.side];
+      if (!(h && h.glove.group.visible && h.speed < 0.08 && realLive() && real.arms.left && real.arms.right)) {
+        calib.stillSince = 0;
+        return;
+      }
+      if (!calib.stillSince) calib.stillSince = now;
+      if (now - calib.stillSince < CAL_STILL_MS) return;
+      calib.touches[calib.side] = { w: h.glove.group.localToWorld(new THREE.Vector3(0, 0, -0.085)), arms: JSON.parse(JSON.stringify(real.arms)) };
+      sfx.beep(true);
+      calib.stillSince = 0;
+      if (calib.side === "left") calib.side = "right";
+      else solveCalibration();
+    }
+    function solveCalibration() {
+      let best = null;
+      for (const arm of [{ left: "left", right: "right" }, { left: "right", right: "left" }]) {
+        const A = {}, P = {}, W = {};
+        for (const side of ["left", "right"]) {
+          const a = calib.touches[side].arms[arm[side]];
+          A[side] = a.p.map((v, i) => v + a.n[i] * FIST_R);   // the glove centre, in its arm's base frame
+          W[side] = calib.touches[side].w;
+        }
+        const dw = tmp().subVectors(W.right, W.left);
+        // The base spacing is only roughly known: pick it so the two touches are as far apart, across
+        // the floor, as the two glove points (the right arm's base is `spacing` along the rig's -y).
+        const lx = A.right[0] - A.left[0], ly = A.right[1] - A.left[1], h2 = dw.x * dw.x + dw.z * dw.z;
+        let spacing = RIG_SPACING;
+        if (h2 > lx * lx) {
+          const r = Math.sqrt(h2 - lx * lx);
+          spacing = [ly + r, ly - r].reduce((b, c) => (Math.abs(c - RIG_SPACING) < Math.abs(b - RIG_SPACING) ? c : b));
+          spacing = clamp(spacing, 0.3, 1.2);
+        }
+        for (const side of ["left", "right"]) P[side] = rigToThree(rigPoint(arm[side], A[side], spacing));
+        const dp = tmp().subVectors(P.right, P.left);
+        const yaw = Math.atan2(dp.z, dp.x) - Math.atan2(dw.z, dw.x);   // R_y(yaw) turns dp onto dw
+        const mp = tmp().addVectors(P.left, P.right).multiplyScalar(0.5);
+        const mw = tmp().addVectors(W.left, W.right).multiplyScalar(0.5);
+        const t = mw.clone().sub(mp.applyAxisAngle(Y_UP, yaw));
+        // Of the two ways to pair pads with arms, the right one has the rig facing the player.
+        const facing = new THREE.Vector3(0, 0, -1).applyAxisAngle(Y_UP, yaw).dot(tmp().subVectors(viewerPos, mw).setY(0).normalize());
+        if (!best || facing > best.facing) best = { yaw, t: t.toArray(), arm, spacing, facing, err: Math.abs(dp.length() - dw.length()) };
+      }
+      rigCal = { yaw: best.yaw, t: best.t, arm: best.arm, spacing: best.spacing };
+      try { localStorage.setItem("wax.rigcal", JSON.stringify(rigCal)); } catch {}
+      game.notice = `Aligned: arms ${(best.spacing * 100).toFixed(0)} cm apart, touches fit to ${(best.err * 100).toFixed(1)} cm`;
+      game.state = "lobby";
+      game.actionAt = performance.now() + 600;
+      placeTrainer(viewerPos, viewerDir);
+      sfx.cheer();
+    }
+
     // ---------------------------------------------------------------- game state
     const game = {
       state: "setup", source: null, session: null, played: new Set(), reason: "", starting: 0, notice: "", player: null,
@@ -659,6 +844,7 @@
       game.run = 0;
       game.state = "countdown";
       trainer.mood = 0;
+      coachSay("start", null, true);
     }
     function startPractice() {
       const now = now0();
@@ -674,6 +860,7 @@
       const acc = game.hits + game.misses ? game.hits / (game.hits + game.misses) : 0;
       if (reason === "done" && acc >= 0.6 && game.hits >= 5) { sfx.cheer(); react("cheer"); trainer.mood = 1; }
       else trainer.mood = 0;
+      setTimeout(() => coachSay("end", null, true), 900);   // after Convex has the final numbers
     }
 
     function present(now) {
@@ -719,6 +906,9 @@
         ring(fx, quat, color);
         popup(`+${pts}`, color, fx.clone().add(tmp().set(0, 0.12, 0)), 1, `${label}  ${reaction} ms`);
         react("hit");
+        if (reaction > SLOW_MS) coachSay("slow", reaction);
+        else if (game.streak >= 4 && game.streak % 4 === 0) coachSay("streak");
+        else if (reaction < 350 && Math.random() < 0.3) coachSay("hit", reaction);
         if (game.streak % 5 === 0) {
           sfx.streak(game.streak);
           popup(`${game.streak} STREAK!`, "#ffd60a", trainer.head.getWorldPosition(tmp()).add(tmp().set(0, 0.28, 0)), 1.2);
@@ -741,6 +931,7 @@
       game.nextAt = now + game.session.gapMs;
       postEvent("miss", side);
       sfx.miss();
+      coachSay("miss");
       const { pos } = padWorld(side);
       popup("MISS", "#ff5a5a", pos.add(tmp().set(0, 0.15, 0)), 0.9);
       react("miss");
@@ -760,6 +951,11 @@
       }
     }
     function onPinchHold(side, perfNow) {
+      if (side === "right" && realLive() && (game.state === "setup" || game.state === "lobby" || game.state === "results")) {
+        startCalibration();
+        sfx.beep(true);
+        return;
+      }
       if (side === "left" && (game.state === "lobby" || game.state === "results")) {
         game.state = "setup";
         game.actionAt = perfNow + 600;
@@ -811,7 +1007,7 @@
         p.rimMat.color.setHSL(0.15 * (1 - k), 1, 0.55);   // yellow -> red as the window runs out
         p.target.material.opacity = active ? 0.9 : 0;
         const pulse = active ? 0.35 + 0.25 * Math.sin(performance.now() / 70) : 0;
-        p.faceMat.color.set(active ? 0xffd60a : 0xe8e8e8);
+        p.faceMat.color.set(active ? 0xffd60a : PAD_IDLE);
         p.faceMat.emissive.setRGB(pulse, pulse * 0.8, 0);
       }
     }
@@ -846,10 +1042,36 @@
       const linkLine = () => {
         ctx.font = "600 30px system-ui";
         ctx.fillStyle = rig.online ? "#7dffb0" : "#ff9f9f";
-        ctx.fillText(rig.online ? "PHONE APP CONNECTED" : `PHONE APP OFFLINE (${rig.error || "no link"})`, W / 2, H - 46);
+        ctx.fillText(rig.online ? (rig.audienceCode ? `CROWD: waxonwaxoff.ink/audience · ${rig.audienceCode}` : "PHONE APP CONNECTED")
+          : `PHONE APP OFFLINE (${rig.error || "no link"})`, W / 2, H - 46);
       };
 
-      if (game.state === "setup") {
+      const armsLine = (y) => {
+        if (!realLive()) return;
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = "#9fd8ff";
+        ctx.fillText(bound() ? "ROBOT ARMS ALIGNED · hold right pinch to redo" : "Hold a right pinch to align with the robot arms", W / 2, y);
+      };
+
+      if (game.state === "calib") {
+        ctx.font = font(76);
+        ctx.fillText("ALIGN WITH THE ARMS", W / 2, 130);
+        ctx.font = "500 40px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText(`Rest your ${calib.side.toUpperCase()} glove on the pad on your ${calib.side}`, W / 2, 240);
+        ctx.fillText("and hold still", W / 2, 295);
+        const k = calib.stillSince ? clamp((performance.now() - calib.stillSince) / CAL_STILL_MS, 0, 1) : 0;
+        rr(ctx, W / 2 - 250, 350, 500, 36, 18);
+        ctx.fillStyle = "#333";
+        ctx.fill();
+        rr(ctx, W / 2 - 250, 350, Math.max(36, 500 * k), 36, 18);
+        ctx.fillStyle = "#ffd60a";
+        ctx.fill();
+        const both = realLive() && real.arms.left && real.arms.right;
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = both ? "#7dffb0" : "#ff9f9f";
+        ctx.fillText(both ? "BOTH ARMS STREAMING" : "WAITING FOR BOTH ARMS (pad_stream.py)", W / 2, H - 46);
+      } else if (game.state === "setup") {
         ctx.font = font(84);
         ctx.fillText("PLACE YOUR TRAINER", W / 2, 140);
         ctx.font = "500 38px system-ui";
@@ -859,6 +1081,7 @@
         ctx.font = font(56);
         ctx.fillStyle = "#ffd60a";
         ctx.fillText("PINCH RIGHT HAND TO LOCK", W / 2, 430);
+        armsLine(375);
         linkLine();
       } else if (game.state === "lobby" && rig.online && rig.player) {
         ctx.font = "600 34px system-ui";
@@ -893,6 +1116,7 @@
         ctx.font = "500 28px system-ui";
         ctx.fillStyle = "#aaa";
         ctx.fillText("Hold a left pinch to move the trainer", W / 2, 445);
+        armsLine(490);
         noticeLine();
         linkLine();
       } else if (game.state === "lobby") {
@@ -995,7 +1219,8 @@
 
       if (game.state === "setup" || !trainer.root.visible) placeTrainer(viewerPos, viewerDir);
       for (const h of Object.values(hands)) if (h.obj) updateHand(h, perfNow, dt);
-      updateGame();
+      if (game.state === "calib") updateCalibration(perfNow);
+      else updateGame();
       animateTrainer(perfNow, dt, viewerPos);
       updateEffects(dt);
       panel.mesh.lookAt(viewerPos);
