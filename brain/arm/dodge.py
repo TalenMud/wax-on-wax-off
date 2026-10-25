@@ -42,12 +42,15 @@ MAX_LEAD_DEG = 10.0  # max_relative_target: a command never leads the real joint
 # held, each joint's command is trimmed towards cancelling the measured error (no gain changes),
 # capped at TRIM_MAX_DEG, and remembered per pose in TRIM_FILE for the next visit.
 TRIM_RATE, TRIM_MAX_DEG = 0.04, 8.0
+ACCEL_TIME_S = 0.15  # time to reach --speed from rest (and to brake from it)
 TRIM_FILE = Path.home() / ".config" / "wax-on-wax-off" / "arm_trim.json"
 
-# Pad targets in each arm's frame (metres). Bait spots spread a little so the player can't
-# pre-aim; the dodge pulls the pad 15 cm back and 8 cm down from wherever it is.
+# Pad targets in the LEFT arm's frame (metres; +y is the robot's left, i.e. outward, away from the
+# centre beam and its downward-tilted top camera). The right arm uses the mirror image. Bait
+# spots spread a little so the player can't pre-aim; the dodge slips the pad outward and a
+# little back, never towards the player and never towards the beam.
 BAIT = [(0.40, 0.00, 0.32), (0.37, 0.06, 0.35), (0.38, -0.06, 0.28)]
-DODGE_BACK, DODGE_DOWN = 0.15, 0.08
+DODGE_BACK, DODGE_OUT, DODGE_DOWN = 0.08, 0.15, 0.0
 DODGE_HOLD_S = 0.6
 SEED = np.radians([0, -90, 110, -100, 0, 0])  # elbow-up family; IK stays on this side
 MAX_IK_ERR = 0.005
@@ -59,7 +62,7 @@ def plan(chain: Chain) -> dict:
     out = {"bait": [], "dodge": []}
     for x, y, z in BAIT:
         q, err = solve_pad(chain, np.array([x, y, z]), SEED)
-        qd, errd = solve_pad(chain, np.array([x - DODGE_BACK, y, z - DODGE_DOWN]), q)
+        qd, errd = solve_pad(chain, np.array([x - DODGE_BACK, y + DODGE_OUT, z - DODGE_DOWN]), q)
         for name, e in (("bait", err), ("dodge", errd)):
             if e > MAX_IK_ERR:
                 raise ValueError(f"{name} for bait {(x, y, z)} is out of reach ({e * 1000:.0f} mm off)")
@@ -79,7 +82,7 @@ def mirror(pose: dict[str, float]) -> dict[str, float]:
 
 def arm_poses(chain: Chain, side: str) -> dict:
     p = plan(chain)
-    # BAIT y > 0 means towards the centre beam for the left arm; mirror it for the right arm.
+    # BAIT/DODGE y > 0 is outward for the left arm; mirror it for the right arm.
     if side == "right":
         p = {k: [mirror(x) for x in v] for k, v in p.items()}
     return p
@@ -126,7 +129,9 @@ class Arm:
             disable_torque_on_disconnect=True,
         )
         self.side = side
-        self.step = speed_deg_s / HZ
+        self.speed = speed_deg_s
+        self.accel = speed_deg_s / ACCEL_TIME_S
+        self.v = 0.0  # current speed of the leading joint, deg/s
         self.robot = MetalFollower(cfg)
         self.poses: dict = {}
         try:
@@ -144,15 +149,22 @@ class Arm:
         self.cmd = dict(self.target)  # where we are commanding each joint right now
 
     def move_towards(self, goal: dict[str, float], key: str | None = None) -> bool:
-        """One tick: step the command at most self.step deg per joint towards goal (plus its
-        learned sag trim, if key names the pose). True when the command has arrived."""
+        """One tick towards goal (plus its learned sag trim, if key names the pose). All joints
+        move along a straight line in joint space so they start and finish together; the leading
+        joint speeds up to self.speed and brakes in time (trapezoid). True when it has arrived."""
         trim = self.trim.get(key, {}) if key else {}
-        done = True
+        delta = {m: goal[m] + trim.get(m, 0.0) - self.cmd[m] for m in MOTORS}
+        dist = max(abs(d) for d in delta.values())
+        dt = 1 / HZ
+        brake = math.sqrt(2 * self.accel * dist)  # fastest speed that can still stop in dist
+        self.v = min(self.speed, self.v + self.accel * dt, brake)
+        step = self.v * dt
+        done = dist <= max(step, 0.05)
+        if done:
+            self.v = 0.0
+        frac = 1.0 if done else step / dist
         for m in MOTORS:
-            d = goal[m] + trim.get(m, 0.0) - self.cmd[m]
-            if abs(d) > self.step:
-                d, done = math.copysign(self.step, d), False
-            self.cmd[m] += d
+            self.cmd[m] += delta[m] * frac
         action = {f"{m}.pos": self.cmd[m] for m in MOTORS}
         action["gripper.pos"] = self.gripper
         self.robot.send_action(action)

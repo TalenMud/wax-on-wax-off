@@ -94,6 +94,21 @@ class Chain:
                 i += 1
         return T
 
+    def points(self, q: np.ndarray, offset: float = PAD_OFFSET) -> np.ndarray:
+        """Positions (n, 3) of every joint after the shoulder, the gripper base and the pad: the
+        parts of the arm that could reach the table."""
+        T, i, out = np.eye(4), 0, []
+        for s in self.steps:
+            T = T @ s["origin"]
+            if s["type"] == "revolute":
+                if i >= 2:
+                    out.append(T[:3, 3].copy())
+                T = T @ _tf(_axis_angle(s["axis"], q[i]), [0, 0, 0])
+                i += 1
+        out.append(T[:3, 3].copy())
+        out.append(T[:3, 3] + offset * T[:3, 0])
+        return np.array(out)
+
     def pad(self, q: np.ndarray, offset: float = PAD_OFFSET) -> tuple[np.ndarray, np.ndarray]:
         """Pad centre and face normal (unit, pointing away from the arm) in the arm frame."""
         T = self.tip(q)

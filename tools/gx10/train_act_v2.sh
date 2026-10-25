@@ -1,0 +1,2 @@
+#!/bin/sh
+cd ~/wax/train && rm -rf act_dodge_v2 && exec ~/wax/.venv/bin/python train.py --dataset.repo_id=dodge_bomba_merged --dataset.root=/home/asus/wax/data/ww/dodge_bomba_merged --dataset.image_transforms.enable=true --policy.type=act --policy.chunk_size=30 --policy.n_action_steps=30 --policy.device=cuda --policy.use_amp=true --policy.push_to_hub=false --batch_size=16 --steps=40000 --save_freq=5000 --log_freq=100 --num_workers=8 --output_dir=/home/asus/wax/train/act_dodge_v2 --job_name=act_dodge_v2 --wandb.enable=false
