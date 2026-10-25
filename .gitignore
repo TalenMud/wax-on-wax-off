@@ -6,3 +6,5 @@ node_modules/
 logs/
 vr/music/*
 !vr/music/README.md
+video/audio/
+video/out/
