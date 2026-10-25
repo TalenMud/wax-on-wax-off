@@ -1,20 +1,38 @@
 [
- {"id": "hook",
-  "text": "Boxing needs a partner. Someone to hold the pads, call the combos and push you when you fade. Most people training alone never get one. So we built one."},
- {"id": "what",
-  "text": "This is Wax On Wax Off. Two robot arms hold real pads. You wear a Quest headset in passthrough, your hands become gloves, and a virtual coach stands right behind the arms, lined up with them, so every punch you see lands on something real."},
- {"id": "system",
-  "text": "Under the hood: the headset tracks your hands and runs the game. A laptop server links it to an ASUS GX10, which drives both arms over CAN bus, and to a Convex backend that saves every punch, so your phone shows live stats and a leaderboard."},
- {"id": "align",
-  "text": "To line up the virtual and the real, you rest each glove on its pad for a second. The GX10 streams both pad positions from the arms' joint angles thirty times a second, and two touches give us the rig's position, heading and spacing."},
- {"id": "learning",
-  "text": "We also tried to teach the arms to dodge. We recorded twenty eight demonstrations and trained an ACT policy on the GX10. Before powering anything, we tested it in shadow mode and replayed recorded dodges through it. It learned about a third of the motion, because one camera frame can't show a punch coming, and random dodge directions average out to a wobble."},
- {"id": "reflex",
-  "text": "So we split perception from motion, the way real robots do. The headset already sees your fist closing in. When it does, the arm snaps to one of a few dodge poses a person taught it by hand, holds, and returns."},
- {"id": "safety",
-  "text": "Safety came first. Every pose is human taught. Commands are clamped above the table and away from the arm's own base, speed is capped, and torque cuts out if the laptop's heartbeat stops, the arm stalls, or anyone presses control C."},
- {"id": "coach",
-  "text": "Then there's the coach. After every round, an agent reads your stats from Convex, and Nemotron, running locally on the GX10, plans your next round around your weakest hand. ElevenLabs gives it a voice, and the crowd can heckle you live from their phones."},
- {"id": "close",
-  "text": "Reaction time per hand, accuracy and streaks, tracked every round, in a browser, with no app store. A sparring partner that never gets tired. That's Wax On Wax Off. Come and get punched at."}
+ {
+  "id": "hook",
+  "text": "Boxing needs a partner. Someone to hold the pads, call the combos and push you when you fade. Most people training alone never get one. So we built one."
+ },
+ {
+  "id": "what",
+  "text": "This is Wax On Wax Off. Two robot arms hold real pads. You wear a Quest headset in passthrough, your hands become gloves, and a virtual coach stands right behind the arms, lined up with them, so every punch you see lands on something real."
+ },
+ {
+  "id": "system",
+  "text": "Under the hood: the headset tracks your hands and runs the game. A laptop server links it to an ASUS GX10, which drives both arms over CAN bus, and to a Convex backend that saves every punch, so your phone shows live stats and a leaderboard."
+ },
+ {
+  "id": "align",
+  "text": "To line up the virtual and the real, you rest each glove on its pad for a second. The GX10 streams both pad positions from the arms' joint angles thirty times a second, and two touches give us the rig's position, heading and spacing."
+ },
+ {
+  "id": "learning",
+  "text": "We also tried to teach the arms to dodge. We recorded twenty eight demonstrations and trained an ACT policy on the GX10. Before powering anything, we tested it in shadow mode and replayed recorded dodges through it. It learned about a third of the motion, because one camera frame can't show a punch coming, and random dodge directions average out to a wobble."
+ },
+ {
+  "id": "reflex",
+  "text": "So we split perception from motion, the way real robots do. The headset already sees your fist closing in. When it does, the arm snaps to one of a few dodge poses a person taught it by hand, holds, and returns."
+ },
+ {
+  "id": "safety",
+  "text": "Safety came first. Every pose is human taught. Commands are clamped above the table and away from the arm's own base, speed is capped, and torque cuts out if the laptop's heartbeat stops, the arm stalls, or anyone presses control C."
+ },
+ {
+  "id": "coach",
+  "text": "Then there's the coach. After every round, an agent reads your stats from Convex, and Nemotron, running locally on the GX10, plans your next round around your weakest hand. ElevenLabs gives it a voice, and the crowd can heckle you live from their phones."
+ },
+ {
+  "id": "close",
+  "text": "Reaction time per hand, accuracy and streaks, tracked every round, in a browser, with no app store. A sparring partner that never gets tired. That's Wax On Wax Off. Come and throw a few punches."
+ }
 ]

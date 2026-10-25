@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 AUDIO = HERE / "audio"
 OUT = HERE / "out"
 KEY_FILE = Path.home() / ".config" / "wax-on-wax-off" / "elevenlabs_key"
-GAP_S = 0.4  # must match pitch.py dur()
+GAP_S = 0.8  # must match pitch.py GAP_S
 MANIMGL = HERE / ".venv" / "bin" / "manimgl"
 
 
@@ -28,7 +28,7 @@ def tts(text: str, voice: str, key: str, out: Path) -> None:
     req = urllib.request.Request(
         f"https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_128",
         data=json.dumps({"text": text, "model_id": "eleven_multilingual_v2",
-                         "voice_settings": {"stability": 0.5, "similarity_boost": 0.85, "style": 0.3}}).encode(),
+                         "voice_settings": {"stability": 0.5, "similarity_boost": 0.85, "style": 0.3, "speed": 0.9}}).encode(),
         headers={"xi-api-key": key, "Content-Type": "application/json"},
         method="POST",
     )
