@@ -70,6 +70,7 @@
     const THREAT_SPEED = 1.5;       // m/s closing speed
     const DODGE_MS = 600;           // matches dodge.py's DODGE_HOLD_S
     const DODGE_CHANCE = { easy: 0.3, medium: 0.5, hard: 0.75 };
+    const DODGE_ALWAYS = new URLSearchParams(location.search).get("dodge") === "always";   // demos
     // Which robot arm holds the pad on the player's left. ?swaparms=1 if the Lab's names are the other way.
     const ROBOT_ARM = new URLSearchParams(location.search).has("swaparms") ? { left: "right", right: "left" } : { left: "left", right: "right" };
     // Real arms (brain/arm/pad_stream.py -> /rig/pads): after a two-touch alignment the coach stands
@@ -653,7 +654,7 @@
       const p = trainer.pads[side];
       if (perfNow < p.dodgeUntil || perfNow - p.lastThreat < 800) return;
       p.lastThreat = perfNow;
-      if (Math.random() > (DODGE_CHANCE[game.session.difficulty] ?? 0.5)) return;
+      if (!DODGE_ALWAYS && Math.random() > (DODGE_CHANCE[game.session.difficulty] ?? 0.5)) return;
       p.dodgeUntil = perfNow + DODGE_MS;
       sfx.dodge();
       popup("DODGE!", "#ff9f40", p.group.getWorldPosition(tmp()).add(tmp().set(0, 0.16, 0)), 0.8);

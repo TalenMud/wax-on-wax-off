@@ -10,7 +10,7 @@ backend through brain/convex_bridge.py and the headset plays the rig's part:
                       times are this laptop's epoch ms; reactions: [{id, emoji, at}] audience emoji, last ~5 s
     POST /rig/event   {sessionId, kind: present|hit|miss, arm: left|right, reactionMs?} -> {accepted}
     POST /rig/start   {mode, difficulty} -> {ok, sessionId} or {ok: false, error}  for the linked player
-    POST /rig/threat  {arm: left|right} -> 204   forwarded to brain/arm/dodge.py (--arm-host)
+    POST /rig/threat  {arm: left|right} -> 204   forwarded to brain/arm/reflex.py (--arm-host)
     POST /coach/plan  {} -> {plan: {difficulty, focus, reason, say}, source: nemotron|rules}: the coach agent
                       reads the player's Convex stats and plans the next round (tools/coach_agent.py)
     POST /coach/speak {text} -> audio/mpeg: any line in the coach's voice
@@ -19,7 +19,7 @@ backend through brain/convex_bridge.py and the headset plays the rig's part:
     GET  /rig/pads    {ageMs, left, right}  the real pads from brain/arm/pad_stream.py (udp 9311), each
                       {p, n} in its arm's base frame or null; ageMs null until the first packet
 
-With --arm-host, a 20 Hz UDP heartbeat keeps brain/arm/dodge.py's watchdog fed; stopping this
+With --arm-host, a 20 Hz UDP heartbeat keeps brain/arm/reflex.py's watchdog fed; stopping this
 server stops the heartbeat, which turns the arms' torque off within half a second.
 
 HUB_SECRET stays on this laptop; the headset only ever talks to this server.
@@ -109,11 +109,17 @@ class Rig:
 
 
 class ArmLink:
-    """UDP link to brain/arm/dodge.py: heartbeat for its watchdog, threats from the headset."""
+    """UDP link to brain/arm/reflex.py: heartbeat for its watchdog, threats from the headset."""
 
     def __init__(self, host: str | None, port: int = 9310) -> None:
-        self.addr = (host, port) if host else None
+        # host may be IPv4 or IPv6 link-local with a scope (fe80::...%enx...), the direct cable's
+        # address whatever the GX10's IPv4 settings are.
+        self.addr = None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if host:
+            family, _, _, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
+            self.addr = addr
+            self.sock = socket.socket(family, socket.SOCK_DGRAM)
 
     def send(self, msg: dict) -> None:
         if self.addr:
@@ -277,7 +283,8 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--arm-host", help="machine running brain/arm/dodge.py, e.g. 10.42.0.109 (the GX10)")
+    ap.add_argument("--arm-host", help="the GX10 running brain/arm/reflex.py: IPv4, or IPv6 link-local with its scope, "
+                    "e.g. fe80::d293:20c9:afcc:fe9%%enx349971eb0d92")
     a = ap.parse_args()
 
     secret = os.environ.get("HUB_SECRET")
