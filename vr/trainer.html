@@ -665,6 +665,41 @@
       }
     }
 
+    // The coach agent (tools/coach_agent.py): after a round it reads the stats from Convex and plans
+    // the next one with Nemotron on the GX10. The plan is applied here: the next round starts at its
+    // difficulty and brings up more pads on its focus side.
+    const FOCUS_SHARE = 0.65;       // share of pads on the focus side
+    async function planNextRound() {
+      try {
+        const r = await (await fetch("/coach/plan", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
+        game.plan = { ...r.plan, source: r.source };
+      } catch {
+        coachSay("end", null, true);
+        return;
+      }
+      await coachSpeak(game.plan.say);
+    }
+    async function coachSpeak(text) {
+      if (!actx || coach.speaking) return;
+      coach.speaking = true;
+      try {
+        const r = await fetch("/coach/speak", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+        if (r.status !== 200) return;
+        const buf = await actx.decodeAudioData(await r.arrayBuffer());
+        const src = actx.createBufferSource();
+        src.buffer = buf;
+        const g = actx.createGain();
+        g.gain.value = 1.4;
+        src.connect(g).connect(master);
+        src.start();
+        coach.busyUntil = performance.now() + buf.duration * 1000 + COACH_GAP_MS;
+      } catch {
+        // no voice this time
+      } finally {
+        coach.speaking = false;
+      }
+    }
+
     const seenReactions = new Set();
     async function pollRig() {
       const t0 = Date.now();
@@ -717,7 +752,7 @@
         const r = await fetch("/rig/start", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ mode: "standard", difficulty: "medium" }),
+          body: JSON.stringify({ mode: "standard", difficulty: game.plan?.difficulty || "medium" }),
         });
         const j = await r.json();
         if (!j.ok) { game.starting = 0; game.notice = `Couldn't start: ${j.error}`; sfx.miss(); }
@@ -848,7 +883,7 @@
     }
     function startPractice() {
       const now = now0();
-      startRound("practice", { id: `practice-${now}`, mode: "standard", difficulty: "medium", startsAt: now + COUNTDOWN_MS, endsAt: now + COUNTDOWN_MS + MODES.standard.durationS * 1000 });
+      startRound("practice", { id: `practice-${now}`, mode: "standard", difficulty: game.plan?.difficulty || "medium", startsAt: now + COUNTDOWN_MS, endsAt: now + COUNTDOWN_MS + MODES.standard.durationS * 1000 });
     }
     function endRound(reason) {
       if (game.state !== "round" && game.state !== "countdown") return;
@@ -860,7 +895,7 @@
       const acc = game.hits + game.misses ? game.hits / (game.hits + game.misses) : 0;
       if (reason === "done" && acc >= 0.6 && game.hits >= 5) { sfx.cheer(); react("cheer"); trainer.mood = 1; }
       else trainer.mood = 0;
-      setTimeout(() => coachSay("end", null, true), 900);   // after Convex has the final numbers
+      setTimeout(planNextRound, 1200);   // after Convex has the final numbers
     }
 
     function present(now) {
@@ -868,6 +903,12 @@
       if (game.run < s.maxRun && Math.random() < 0.5 && game.run > 0) game.run++;
       else if (game.run > 0) { game.arm = game.arm === "left" ? "right" : "left"; game.run = 1; }
       else game.run = 1;
+      // The coach agent's focus: about FOCUS_SHARE of the pads come up on the weak side.
+      const focus = game.plan?.focus;
+      if ((focus === "left" || focus === "right") && game.arm !== focus && Math.random() < (FOCUS_SHARE - 0.5) * 2) {
+        game.arm = focus;
+        game.run = 1;
+      }
       game.active = { arm: game.arm, since: now };
       sfx.present();
       postEvent("present", game.arm);
@@ -1191,7 +1232,15 @@
         ctx.fillText(`LEFT ${L.hits}/${L.hits + L.misses}`, W / 2 - 170, 460);
         ctx.fillStyle = "#ff8f86";
         ctx.fillText(`RIGHT ${R.hits}/${R.hits + R.misses}`, W / 2 + 170, 460);
-        if (avg) {
+        if (game.plan) {   // the coach agent's plan for the next round, applied when it starts
+          const p = game.plan;
+          ctx.font = font(40);
+          ctx.fillStyle = "#9fd8ff";
+          ctx.fillText(`NEXT: ${p.difficulty.toUpperCase()} · ${p.focus === "both" ? "BOTH HANDS" : `${p.focus.toUpperCase()} FOCUS`}`, W / 2, 515);
+          ctx.font = "500 24px system-ui";
+          ctx.fillStyle = "#aaa";
+          ctx.fillText(`${p.reason || ""} · planned by ${p.source === "nemotron" ? "Nemotron on the GX10" : "rules"}`.slice(0, 80), W / 2, 548);
+        } else if (avg) {
           const [label, color] = rating(avg);
           ctx.font = font(44);
           ctx.fillStyle = color;

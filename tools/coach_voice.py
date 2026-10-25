@@ -122,6 +122,11 @@ class Coach:
             self.context_at = time.monotonic()
         return self.context
 
+    def fresh_context(self) -> dict:
+        """The player's stats straight from Convex, skipping the cache (for the coach agent)."""
+        self.context_at = 0.0
+        return self._context()
+
     def line(self, event: str, ms: float | None = None) -> str | None:
         f = facts(self._context(), event, ms)
         usable = []

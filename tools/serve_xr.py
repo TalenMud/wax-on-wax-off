@@ -11,6 +11,9 @@ backend through brain/convex_bridge.py and the headset plays the rig's part:
     POST /rig/event   {sessionId, kind: present|hit|miss, arm: left|right, reactionMs?} -> {accepted}
     POST /rig/start   {mode, difficulty} -> {ok, sessionId} or {ok: false, error}  for the linked player
     POST /rig/threat  {arm: left|right} -> 204   forwarded to brain/arm/dodge.py (--arm-host)
+    POST /coach/plan  {} -> {plan: {difficulty, focus, reason, say}, source: nemotron|rules}: the coach agent
+                      reads the player's Convex stats and plans the next round (tools/coach_agent.py)
+    POST /coach/speak {text} -> audio/mpeg: any line in the coach's voice
     POST /coach/say   {event: start|miss|slow|hit|streak|crowd|end, ms?} -> audio/mpeg (X-Coach-Line: the text),
                       a line from the player's Convex stats spoken by ElevenLabs; 204 if none (tools/coach_voice.py)
     GET  /rig/pads    {ageMs, left, right}  the real pads from brain/arm/pad_stream.py (udp 9311), each
@@ -37,7 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from brain.convex_bridge import ConvexBridge  # noqa: E402
-from coach_voice import Coach  # noqa: E402  (tools/, next to this file)
+import coach_agent  # noqa: E402  (tools/, next to this file)
+from coach_voice import Coach  # noqa: E402
 
 LOG = ROOT / "logs" / f"xr-{time.strftime('%Y%m%d')}.jsonl"
 DEFAULT_SITE = "https://abundant-roadrunner-265.convex.site"
@@ -163,6 +167,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _mp3(self, text: str, mp3: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(mp3)))
+        self.send_header("X-Coach-Line", text.encode("ascii", "replace").decode())
+        self.end_headers()
+        self.wfile.write(mp3)
+
     def _body(self) -> dict | None:
         try:
             return json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
@@ -217,12 +229,24 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             text, mp3 = said
             print(f"coach [{body.get('event')}]: {text}")
-            self.send_response(200)
-            self.send_header("Content-Type", "audio/mpeg")
-            self.send_header("Content-Length", str(len(mp3)))
-            self.send_header("X-Coach-Line", text.encode("ascii", "replace").decode())
-            self.end_headers()
-            self.wfile.write(mp3)
+            self._mp3(text, mp3)
+        elif self.path == "/coach/plan":
+            result = coach_agent.plan(self.coach.fresh_context())
+            print(f"coach agent [{result['source']}]: {result['plan']}")
+            self._json(200, result)
+        elif self.path == "/coach/speak":
+            body = self._body()
+            text = str((body or {}).get("text", ""))[:300]
+            if not text or not self.coach.key:
+                self.send_response(204)
+                self.end_headers()
+                return
+            try:
+                self._mp3(text, self.coach.speak(text))
+            except Exception as e:
+                print(f"coach: {e}")
+                self.send_response(204)
+                self.end_headers()
         elif self.path == "/rig/threat":
             body = self._body()
             if body is None or body.get("arm") not in ("left", "right"):
