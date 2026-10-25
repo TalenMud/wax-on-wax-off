@@ -21,9 +21,9 @@ export const DIFFICULTIES: Record<
   Difficulty,
   { label: string; windowMs: number; maxRun: number; gapMs: number; blurb: string }
 > = {
-  easy: { label: "Easy", windowMs: 1500, maxRun: 2, gapMs: 900, blurb: "Slow arm, short runs" },
-  medium: { label: "Medium", windowMs: 1000, maxRun: 3, gapMs: 650, blurb: "Mixed runs" },
-  hard: { label: "Hard", windowMs: 700, maxRun: 4, gapMs: 450, blurb: "Fast arm, long streaks" },
+  easy: { label: "Easy", windowMs: 2000, maxRun: 2, gapMs: 900, blurb: "Slow arm, short runs" },
+  medium: { label: "Medium", windowMs: 1500, maxRun: 3, gapMs: 650, blurb: "Mixed runs" },
+  hard: { label: "Hard", windowMs: 1000, maxRun: 4, gapMs: 450, blurb: "Fast arm, long streaks" },
 };
 
 export const COUNTDOWN_MS = 3000;

@@ -45,9 +45,9 @@
       round: { label: "FIGHT ROUND", durationS: 180 },
     };
     const DIFFICULTIES = {
-      easy: { label: "EASY", windowMs: 1500, maxRun: 2, gapMs: 900 },
-      medium: { label: "MEDIUM", windowMs: 1000, maxRun: 3, gapMs: 650 },
-      hard: { label: "HARD", windowMs: 700, maxRun: 4, gapMs: 450 },
+      easy: { label: "EASY", windowMs: 2000, maxRun: 2, gapMs: 900 },
+      medium: { label: "MEDIUM", windowMs: 1500, maxRun: 3, gapMs: 650 },
+      hard: { label: "HARD", windowMs: 1000, maxRun: 4, gapMs: 450 },
     };
     const COUNTDOWN_MS = 3000;
     const pointsFor = (ms, streak) => (ms < 400 ? 100 : ms < 600 ? 75 : 50) + Math.min(streak, 10) * 10;
@@ -57,7 +57,7 @@
     const PAD_R = 0.075;             // real pads are 5-6 cm across; drawn bigger, as passthrough is imperfect
     const PAD_IDLE = 0xfff0a0;       // pale yellow; the active pad is bright 0xffd60a and pulses
     const HIT_MIN_APPROACH = 0.5;   // m/s toward the pad face
-    const HIT_SLACK = 0.03;         // metres of forgiveness around the pad for a hit (passthrough isn't exact)
+    const HIT_SLACK = 0.05;         // metres of forgiveness around the pad for a hit (passthrough isn't exact)
     const HIT_DEBOUNCE_MS = 250;
     const MAX_HAND_SPEED = 15;      // faster than this between frames is a tracking glitch
     const GHOST_MS = 150;           // keep a lost hand moving along its last velocity this long
@@ -70,7 +70,7 @@
     const THREAT_DIST = 0.35;       // metres from the fist to the pad centre
     const THREAT_SPEED = 1.5;       // m/s closing speed
     const DODGE_MS = 600;           // matches dodge.py's DODGE_HOLD_S
-    const DODGE_CHANCE = { easy: 0.3, medium: 0.5, hard: 0.75 };
+    const DODGE_CHANCE = { easy: 0.15, medium: 0.3, hard: 0.5 };
     const DODGE_ALWAYS = new URLSearchParams(location.search).get("dodge") === "always";   // demos
     // Which robot arm holds the pad on the player's left. ?swaparms=1 if the Lab's names are the other way.
     const ROBOT_ARM = new URLSearchParams(location.search).has("swaparms") ? { left: "right", right: "left" } : { left: "left", right: "right" };
@@ -657,6 +657,7 @@
       p.lastThreat = perfNow;
       if (!DODGE_ALWAYS && Math.random() > (DODGE_CHANCE[game.session.difficulty] ?? 0.5)) return;
       p.dodgeUntil = perfNow + DODGE_MS;
+      game.active.since += DODGE_MS;   // the pad's clock stops while it's away: a dodge isn't a free miss
       sfx.dodge();
       popup("DODGE!", "#ff9f40", p.group.getWorldPosition(tmp()).add(tmp().set(0, 0.16, 0)), 0.8);
       fetch("/rig/threat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ arm: robotArm(side) }) }).catch(() => {});
