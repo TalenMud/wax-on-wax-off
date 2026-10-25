@@ -294,6 +294,7 @@
         trainer.root.lookAt(headPos.x, trainer.root.position.y, headPos.z);
       }
       for (const m of trainer.lower) m.visible = !onRig;
+      trainer.onRig = onRig;
       const padY = (headPos.y - 0.12) / s, padZ = (TRAINER_DIST - PAD_REACH) / s;
       for (const side of ["left", "right"]) {
         const sx = side === "left" ? -1 : 1;
@@ -841,10 +842,104 @@
       rigCal = { yaw: best.yaw, t: best.t, arm: best.arm, spacing: best.spacing };
       try { localStorage.setItem("wax.rigcal", JSON.stringify(rigCal)); } catch {}
       game.notice = `Aligned: arms ${(best.spacing * 100).toFixed(0)} cm apart, touches fit to ${(best.err * 100).toFixed(1)} cm`;
-      game.state = "lobby";
-      game.actionAt = performance.now() + 600;
+      openMenu(performance.now());
       placeTrainer(viewerPos, viewerDir);
       sfx.cheer();
+    }
+
+    // ---------------------------------------------------------------- start screen
+    // START and ADJUST float between the player and the trainer, anchored where the player stood
+    // when the menu opened. Poke one with a fingertip; a right pinch is START, a left pinch ADJUST.
+    // Nothing starts a round (headset or phone) until START.
+    function makeButton(label) {
+      // A red horizontal pill with white text; brighter, with a white rim, when a fingertip is near.
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 200;
+      const x = c.getContext("2d");
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      let mesh = null;
+      const draw = (hot) => {
+        x.clearRect(0, 0, 512, 200);
+        rr(x, 10, 10, 492, 180, 90);
+        x.fillStyle = hot ? "#ff5a44" : "#e8442e";
+        x.fill();
+        x.lineWidth = 10;
+        x.strokeStyle = hot ? "#ffffff" : "rgba(255,255,255,0.35)";
+        x.stroke();
+        x.fillStyle = "#ffffff";
+        x.font = font(92);
+        x.textAlign = "center";
+        x.textBaseline = "middle";
+        x.fillText(label, 256, 106);
+        tex.needsUpdate = true;
+        if (mesh) mesh.scale.setScalar(hot ? 1.08 : 1);
+      };
+      draw(false);
+      mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.1),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false }));
+      mesh.renderOrder = 30;
+      mesh.visible = false;
+      scene.add(mesh);
+      return { mesh, draw, hot: false };
+    }
+    const menuButtons = { adjust: makeButton("ADJUST"), start: makeButton("START") };
+    const menu = { anchored: false };
+
+    function openMenu(perfNow) {
+      game.state = "menu";
+      game.actionAt = perfNow + 600;
+      menu.anchored = false;
+    }
+    function pressStart(perfNow) {
+      game.state = "lobby";
+      game.actionAt = perfNow + 600;
+      sfx.beep(true);
+    }
+    function pressAdjust(perfNow) {
+      game.actionAt = perfNow + 600;
+      sfx.beep(true);
+      if (realLive()) startCalibration();   // line up with the real arms by touch
+      else game.state = "setup";            // no arms: the trainer follows your gaze until you pinch
+    }
+
+    function updateMenu(perfNow) {
+      const show = game.state === "menu";
+      for (const b of Object.values(menuButtons)) b.mesh.visible = show;
+      if (!show) return;
+      if (bound() && !trainer.onRig) placeTrainer(viewerPos, viewerDir);   // the arms' stream arrived late
+      if (!menu.anchored) {
+        const dir = tmp().copy(viewerDir).setY(0).normalize();
+        const right = tmp().crossVectors(dir, Y_UP).normalize();
+        const base = tmp().copy(viewerPos).addScaledVector(dir, 0.42);
+        base.y = viewerPos.y - 0.28;
+        menuButtons.adjust.mesh.position.copy(base).addScaledVector(right, -0.15);
+        menuButtons.start.mesh.position.copy(base).addScaledVector(right, 0.15);
+        for (const b of Object.values(menuButtons)) b.mesh.lookAt(viewerPos);
+        menu.anchored = true;
+      }
+      // A fingertip inside a button presses it; near it lights it up.
+      for (const [name, b] of Object.entries(menuButtons)) {
+        let hot = false, pressed = false;
+        for (const h of Object.values(hands)) {
+          const tip = h.obj && JOINT(h.obj, "index-finger-tip");
+          if (!tip) continue;
+          const p = b.mesh.worldToLocal(tip.clone());
+          if (Math.abs(p.x) < 0.15 && Math.abs(p.y) < 0.07) {
+            if (Math.abs(p.z) < 0.12) hot = true;
+            if (Math.abs(p.z) < 0.025) pressed = true;
+          }
+        }
+        if (hot !== b.hot) { b.hot = hot; b.draw(hot); }
+        if (pressed && perfNow >= game.actionAt) {
+          b.hot = false;
+          b.draw(false);
+          if (name === "start") pressStart(perfNow);
+          else pressAdjust(perfNow);
+          return;
+        }
+      }
     }
 
     // ---------------------------------------------------------------- game state
@@ -980,9 +1075,11 @@
 
     function onPinch(side, perfNow) {
       if (perfNow < game.actionAt) return;
-      if (game.state === "setup" && side === "right") {
-        game.state = "lobby";
-        game.actionAt = perfNow + 600;
+      if (game.state === "menu") {
+        if (side === "right") pressStart(perfNow);
+        else pressAdjust(perfNow);
+      } else if (game.state === "setup" && side === "right") {
+        openMenu(perfNow);
         sfx.beep(true);
       } else if ((game.state === "lobby" || game.state === "results") && side === "right") {
         game.actionAt = perfNow + 600;
@@ -992,14 +1089,8 @@
       }
     }
     function onPinchHold(side, perfNow) {
-      if (side === "right" && realLive() && (game.state === "setup" || game.state === "lobby" || game.state === "results")) {
-        startCalibration();
-        sfx.beep(true);
-        return;
-      }
       if (side === "left" && (game.state === "lobby" || game.state === "results")) {
-        game.state = "setup";
-        game.actionAt = perfNow + 600;
+        openMenu(perfNow);
         sfx.beep(false);
       }
     }
@@ -1091,10 +1182,22 @@
         if (!realLive()) return;
         ctx.font = "600 30px system-ui";
         ctx.fillStyle = "#9fd8ff";
-        ctx.fillText(bound() ? "ROBOT ARMS ALIGNED · hold right pinch to redo" : "Hold a right pinch to align with the robot arms", W / 2, y);
+        ctx.fillText(bound() ? "ROBOT ARMS ALIGNED · ADJUST in the menu to redo" : "Robot arms found · ADJUST in the menu to line up", W / 2, y);
       };
 
-      if (game.state === "calib") {
+      if (game.state === "menu") {
+        ctx.font = font(104);
+        ctx.fillText("WAX ON WAX OFF", W / 2, 150);
+        ctx.font = "500 38px system-ui";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText("Your sparring coach is ready.", W / 2, 250);
+        ctx.fillText("Poke START to fight, ADJUST to line him up.", W / 2, 305);
+        ctx.font = "600 30px system-ui";
+        ctx.fillStyle = bound() ? "#7dffb0" : realLive() ? "#ffd60a" : "#aaa";
+        ctx.fillText(bound() ? "LINED UP WITH THE ROBOT ARMS" : realLive() ? "ROBOT ARMS FOUND: press ADJUST to line up" : "No robot arms: ADJUST places the coach by gaze", W / 2, 400);
+        noticeLine();
+        linkLine();
+      } else if (game.state === "calib") {
         ctx.font = font(76);
         ctx.fillText("ALIGN WITH THE ARMS", W / 2, 130);
         ctx.font = "500 40px system-ui";
@@ -1156,7 +1259,7 @@
         ctx.fillText("Warm up on the pads while you wait", W / 2, 390);
         ctx.font = "500 28px system-ui";
         ctx.fillStyle = "#aaa";
-        ctx.fillText("Hold a left pinch to move the trainer", W / 2, 445);
+        ctx.fillText("Hold a left pinch for the menu", W / 2, 445);
         armsLine(490);
         noticeLine();
         linkLine();
@@ -1171,7 +1274,7 @@
         ctx.fillText("PINCH RIGHT: 60 s PRACTICE", W / 2, 350);
         ctx.font = "500 32px system-ui";
         ctx.fillStyle = "#aaa";
-        ctx.fillText("Hold a left pinch to move the trainer", W / 2, 430);
+        ctx.fillText("Hold a left pinch for the menu", W / 2, 430);
         linkLine();
       } else if (game.state === "countdown") {
         const n = Math.max(1, Math.ceil((game.session.start - now) / 1000));
@@ -1268,6 +1371,7 @@
 
       if (game.state === "setup" || !trainer.root.visible) placeTrainer(viewerPos, viewerDir);
       for (const h of Object.values(hands)) if (h.obj) updateHand(h, perfNow, dt);
+      updateMenu(perfNow);
       if (game.state === "calib") updateCalibration(perfNow);
       else updateGame();
       animateTrainer(perfNow, dt, viewerPos);
@@ -1290,7 +1394,7 @@
         initAudio();
         const session = await navigator.xr.requestSession("immersive-ar", { optionalFeatures: ["local-floor", "hand-tracking"] });
         await renderer.xr.setSession(session);
-        game.state = "setup";
+        openMenu(performance.now());
         trainer.root.visible = false;
         session.addEventListener("end", () => { enterBtn.textContent = "Enter the ring again"; });
       };
