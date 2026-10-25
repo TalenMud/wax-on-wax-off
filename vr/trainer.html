@@ -676,6 +676,7 @@
     const coach = { busyUntil: 0, speaking: false, crowd: [] };
     async function coachSay(event, ms, force = false) {
       const now = performance.now();
+      if (game.state === "rhythm") return;   // the coach keeps quiet while a song plays
       if (!actx || coach.speaking || (!force && now < coach.busyUntil)) return;
       coach.speaking = true;
       coach.busyUntil = now + COACH_GAP_MS;
@@ -988,7 +989,6 @@
       rhythm[kind]++;
       rhythm.score += (kind === "perfect" ? 300 : 100) * (1 + Math.floor(rhythm.combo / 10) * 0.5);
       popup(kind === "perfect" ? "PERFECT" : "GOOD", kind === "perfect" ? "#ffd60a" : "#9fd8ff", pos, 0.7);
-      if (rhythm.combo > 0 && rhythm.combo % 20 === 0) coachSay("streak");
     }
     // A punch on a pad during a song: the nearest open beat on that pad, if close enough.
     function rhythmHit(side, perfNow) {
