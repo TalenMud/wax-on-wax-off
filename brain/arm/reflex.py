@@ -229,7 +229,8 @@ def cmd_run(args) -> None:
     tripped = False
     try:
         for side in args.arms:
-            arms[side] = ReflexArm(side, poses[side], args.speed)
+            speed = args.right_speed if side == "right" and args.right_speed else args.speed
+            arms[side] = ReflexArm(side, poses[side], speed)
             arms[side].connect()
         print(f"torque on; listening on udp/{UDP_PORT}", flush=True)
         last_hb = time.monotonic() + 3.0  # grace period to start the laptop side
@@ -292,6 +293,7 @@ def main() -> None:
     r = sub.add_parser("run")
     r.add_argument("--arms", nargs="+", choices=SIDES, default=["left"])
     r.add_argument("--speed", type=float, default=30.0, help="deg/s for dodges")
+    r.add_argument("--right-speed", type=float, help="deg/s for the right arm's dodges, if different")
     r.add_argument("--no-heartbeat", action="store_true", help="no laptop needed (poke tests); Ctrl+C still stops")
     p = sub.add_parser("poke")
     p.add_argument("side", choices=SIDES)
