@@ -56,7 +56,8 @@
     const GLOVE_R = 0.06;
     const PAD_R = 0.075;             // real pads are 5-6 cm across; drawn bigger, as passthrough is imperfect
     const PAD_IDLE = 0xfff0a0;       // pale yellow; the active pad is bright 0xffd60a and pulses
-    const HIT_MIN_APPROACH = 0.8;   // m/s toward the pad face
+    const HIT_MIN_APPROACH = 0.5;   // m/s toward the pad face
+    const HIT_SLACK = 0.03;         // metres of forgiveness around the pad for a hit (passthrough isn't exact)
     const HIT_DEBOUNCE_MS = 250;
     const MAX_HAND_SPEED = 15;      // faster than this between frames is a tracking glitch
     const GHOST_MS = 150;           // keep a lost hand moving along its last velocity this long
@@ -627,7 +628,7 @@
             const c = p.group.getWorldPosition(tmp());
             const n = tmp().set(0, 0, 1).applyQuaternion(p.group.getWorldQuaternion(new THREE.Quaternion()));
             const approach = -h.vel.dot(n);
-            if (approach > HIT_MIN_APPROACH && segmentHitsSphere(h.fistPrev, fist, c, PAD_R * trainer.scale + GLOVE_R)) {
+            if (approach > HIT_MIN_APPROACH && segmentHitsSphere(h.fistPrev, fist, c, PAD_R * trainer.scale + GLOVE_R + HIT_SLACK)) {
               h.lastHitT = now;
               onPadHit(side, approach, now, c, n);
               break;
