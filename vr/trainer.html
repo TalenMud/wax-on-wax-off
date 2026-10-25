@@ -57,6 +57,14 @@
     const PAD_REACH = 0.5;          // player's head to the pad face
     const PAD_SPREAD = 0.19;        // pad centre to the trainer's midline
     const PINCH_M = 0.018;
+    // Dodging (brain/arm/dodge.py on the arms' machine, via /rig/threat): a glove this close and
+    // closing this fast on the active pad is a threat; the pad dodges with DODGE_CHANCE.
+    const THREAT_DIST = 0.35;       // metres from the fist to the pad centre
+    const THREAT_SPEED = 1.5;       // m/s closing speed
+    const DODGE_MS = 600;           // matches dodge.py's DODGE_HOLD_S
+    const DODGE_CHANCE = { easy: 0.3, medium: 0.5, hard: 0.75 };
+    // Which robot arm holds the pad on the player's left. ?swaparms=1 if the Lab's names are the other way.
+    const ROBOT_ARM = new URLSearchParams(location.search).has("swaparms") ? { left: "right", right: "left" } : { left: "left", right: "right" };
 
     const statusEl = document.getElementById("status");
     const enterBtn = document.getElementById("enter");
@@ -144,6 +152,7 @@
       beep(go) { osc("square", go ? 1320 : 660, null, go ? 0.35 : 0.12, 0.07); },
       bell() { for (const k of [0, 0.32]) for (const [m, v] of [[1, 0.2], [2.76, 0.08], [5.4, 0.04]]) osc("sine", 560 * m, null, 1.6 / m, v, k); },
       streak(n) { osc("triangle", 660 * 2 ** (Math.min(n, 24) / 24), null, 0.15, 0.1); osc("triangle", 990 * 2 ** (Math.min(n, 24) / 24), null, 0.2, 0.08, 0.08); },
+      dodge() { noise(0.18, 0.3, 2600, { attack: 0.01, type: "highpass", q: 0.5 }); },
       cheer() { noise(1.6, 0.22, 1400, { attack: 0.35, q: 0.4 }); noise(1.2, 0.12, 3000, { attack: 0.2, q: 0.6, delay: 0.25 }); },
     };
 
@@ -247,7 +256,7 @@
         target.position.z = 0.0365;
         padGroup.add(face, backing, rim, target);
         body.add(padGroup);
-        pads[side] = { group: padGroup, faceMat, rimMat, target, recoil: 0, raise: 0, pos: new THREE.Vector3(), quat: new THREE.Quaternion() };
+        pads[side] = { group: padGroup, faceMat, rimMat, target, recoil: 0, raise: 0, pos: new THREE.Vector3(), quat: new THREE.Quaternion(), dodgeUntil: 0, lastThreat: 0 };
       }
 
       root.visible = false;
@@ -314,8 +323,10 @@
 
       for (const side of ["left", "right"]) {
         const p = trainer.pads[side];
-        const target = p.raise > 0.5 ? padLayout.up[side] : padLayout.down[side];
+        let target = p.raise > 0.5 ? padLayout.up[side] : padLayout.down[side];
         if (!target) continue;
+        // Dodging: the real pad pulls 15 cm back and 8 cm down (dodge.py); the virtual one follows.
+        if (now < p.dodgeUntil) target = tmp().copy(target).add(tmp().set(0, -0.08, -0.15).divideScalar(trainer.scale));
         const follow = 1 - Math.exp(-dt * 14);
         p.pos.lerp(target, follow);
         p.quat.slerp(p.raise > 0.5 ? Q_UP : Q_DOWN, follow);
@@ -521,7 +532,7 @@
         if (h.fistPrev && now - h.lastHitT > HIT_DEBOUNCE_MS) {
           for (const side of ["left", "right"]) {
             const p = trainer.pads[side];
-            if (p.raise < 0.5) continue;
+            if (p.raise < 0.5 || now < p.dodgeUntil) continue;
             const c = p.group.getWorldPosition(tmp());
             const n = tmp().set(0, 0, 1).applyQuaternion(p.group.getWorldQuaternion(new THREE.Quaternion()));
             const approach = -h.vel.dot(n);
@@ -532,11 +543,31 @@
             }
           }
         }
+        // Threat: the fist is close and closing fast on a raised pad.
+        for (const side of ["left", "right"]) {
+          const p = trainer.pads[side];
+          if (p.raise < 0.5) continue;
+          const toPad = p.group.getWorldPosition(tmp()).sub(fist);
+          const d = toPad.length();
+          if (d < THREAT_DIST && d > 1e-3 && h.vel.dot(toPad) / d > THREAT_SPEED) maybeDodge(side, now);
+        }
         h.fistPrev = fist;
       } else {
         h.fistPrev = null;
       }
       h.wasTracked = tracked;
+    }
+
+    function maybeDodge(side, perfNow) {
+      if (game.state !== "round" || !game.active || game.active.arm !== side) return;
+      const p = trainer.pads[side];
+      if (perfNow < p.dodgeUntil || perfNow - p.lastThreat < 800) return;
+      p.lastThreat = perfNow;
+      if (Math.random() > (DODGE_CHANCE[game.session.difficulty] ?? 0.5)) return;
+      p.dodgeUntil = perfNow + DODGE_MS;
+      sfx.dodge();
+      popup("DODGE!", "#ff9f40", p.group.getWorldPosition(tmp()).add(tmp().set(0, 0.16, 0)), 0.8);
+      fetch("/rig/threat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ arm: ROBOT_ARM[side] }) }).catch(() => {});
     }
 
     function segmentHitsSphere(p0, p1, c, r) {

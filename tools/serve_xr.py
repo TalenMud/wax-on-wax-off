@@ -9,6 +9,10 @@ backend through brain/convex_bridge.py and the headset plays the rig's part:
     GET  /rig/state   {online, error, estop, now, session, linkCode, player}  times are this laptop's epoch ms
     POST /rig/event   {sessionId, kind: present|hit|miss, arm: left|right, reactionMs?} -> {accepted}
     POST /rig/start   {mode, difficulty} -> {ok, sessionId} or {ok: false, error}  for the linked player
+    POST /rig/threat  {arm: left|right} -> 204   forwarded to brain/arm/dodge.py (--arm-host)
+
+With --arm-host, a 20 Hz UDP heartbeat keeps brain/arm/dodge.py's watchdog fed; stopping this
+server stops the heartbeat, which turns the arms' torque off within half a second.
 
 HUB_SECRET stays on this laptop; the headset only ever talks to this server.
 """
@@ -16,6 +20,7 @@ HUB_SECRET stays on this laptop; the headset only ever talks to this server.
 import argparse
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -91,8 +96,29 @@ class Rig:
         return self.bridge.start(body.get("mode", "standard"), body.get("difficulty", "medium"))
 
 
+class ArmLink:
+    """UDP link to brain/arm/dodge.py: heartbeat for its watchdog, threats from the headset."""
+
+    def __init__(self, host: str | None, port: int = 9310) -> None:
+        self.addr = (host, port) if host else None
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def send(self, msg: dict) -> None:
+        if self.addr:
+            try:
+                self.sock.sendto(json.dumps(msg).encode(), self.addr)
+            except OSError as e:
+                print(f"arm link: {e}")
+
+    def heartbeat(self) -> None:
+        while True:
+            self.send({"t": "hb"})
+            time.sleep(0.05)
+
+
 class Handler(SimpleHTTPRequestHandler):
     rig: Rig
+    arm: ArmLink
 
     def _json(self, code: int, obj: dict) -> None:
         data = json.dumps(obj).encode()
@@ -138,6 +164,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             print(f"rig event {body['kind']} {body['arm']} {body.get('reactionMs', '')} -> {accepted}")
             self._json(200, {"accepted": accepted})
+        elif self.path == "/rig/threat":
+            body = self._body()
+            if body is None or body.get("arm") not in ("left", "right"):
+                self.send_error(400)
+                return
+            self.arm.send({"t": "threat", "arm": body["arm"]})
+            self.send_response(204)
+            self.end_headers()
         elif self.path == "/rig/start":
             body = self._body()
             if body is None:
@@ -160,6 +194,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--arm-host", help="machine running brain/arm/dodge.py, e.g. 10.42.0.109 (the GX10)")
     a = ap.parse_args()
 
     secret = os.environ.get("HUB_SECRET")
@@ -169,6 +204,11 @@ def main() -> None:
     Handler.rig = Rig(bridge)
     if bridge:
         threading.Thread(target=Handler.rig.run, daemon=True).start()
+
+    Handler.arm = ArmLink(a.arm_host)
+    if a.arm_host:
+        threading.Thread(target=Handler.arm.heartbeat, daemon=True).start()
+        print(f"arms: heartbeat + threats -> udp {a.arm_host}:9310")
 
     server = ThreadingHTTPServer(("0.0.0.0", a.port), partial(Handler, directory=str(ROOT)))
     print(f"serving {ROOT} on :{a.port}, stats -> {LOG}")
