@@ -428,6 +428,31 @@
       scene.add(s);
       effects.push({ obj: s, life: 0.9, max: 0.9, kind: "popup" });
     }
+    // Crowd sound effects (vr/sfx/crowd, made by tools/make_crowd_sfx.py): one per emoji, at most one
+    // every CROWD_SFX_GAP_MS so a spamming audience stays funny rather than deafening.
+    const CROWD_SFX_GAP_MS = 8000;
+    const CROWD_SFX = { "🤡": "clown", "😂": "laugh", "💀": "skull", "🔥": "fire", "👏": "clap", "🥊": "glove", "💪": "flex", "😴": "sleep" };
+    const crowdSfx = { buffers: {}, lastAt: -Infinity };
+    async function crowdSound(emoji) {
+      const name = CROWD_SFX[emoji];
+      const now = performance.now();
+      if (!actx || !name || now - crowdSfx.lastAt < CROWD_SFX_GAP_MS) return;
+      crowdSfx.lastAt = now;
+      try {
+        if (!crowdSfx.buffers[name]) {
+          crowdSfx.buffers[name] = await actx.decodeAudioData(await (await fetch(`sfx/crowd/${name}.mp3`)).arrayBuffer());
+        }
+        const src = actx.createBufferSource();
+        src.buffer = crowdSfx.buffers[name];
+        const g = actx.createGain();
+        g.gain.value = 0.8;
+        src.connect(g).connect(master);
+        src.start();
+      } catch {
+        // a missing sound just stays quiet
+      }
+    }
+
     // Audience emoji (waxonwaxoff.ink/audience) float up beside the coach. One texture per emoji.
     const emojiTex = {};
     function crowdEmoji(emoji) {
@@ -716,6 +741,7 @@
           seenReactions.add(r.id);
           if (rig.reactionsPrimed) {
             crowdEmoji(r.emoji);
+            crowdSound(r.emoji);
             coach.crowd.push(performance.now());
           }
         }
