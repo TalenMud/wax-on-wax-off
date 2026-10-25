@@ -11,8 +11,9 @@ ever move between these fixed points, and dodges only move the pad back, away fr
     python -m brain.arm.dodge nudge --arms left --joint wrist_roll --delta 5   # TORQUE ON: one joint
     python -m brain.arm.dodge live --arms left        # TORQUE ON: asks you to type "go" first
 
-Live safety: max_relative_target caps every joint's step per tick (--speed deg/s), the Lab's
-tested MIT gains are used unchanged, torque goes off on Ctrl+C / SIGTERM / a "stop" message,
+Live safety: the commanded pose moves towards its goal at --speed deg/s, and max_relative_target
+(MAX_LEAD_DEG) stops any command getting further than that from where the joint really is; the
+Lab's tested MIT gains are used unchanged, torque goes off on Ctrl+C / SIGTERM / a "stop" message,
 and on a watchdog when the laptop's heartbeat (UDP, 20 Hz) goes quiet for WATCHDOG_S.
 """
 
@@ -35,6 +36,7 @@ CALIBRATION = {"left": "goat_metal_left", "right": "goat_metal_right"}
 UDP_PORT = 9310
 WATCHDOG_S = 0.5
 HZ = 50
+MAX_LEAD_DEG = 10.0  # max_relative_target: a command never leads the real joint by more than this
 
 # Pad targets in each arm's frame (metres). Bait spots spread a little so the player can't
 # pre-aim; the dodge pulls the pad 15 cm back and 8 cm down from wherever it is.
@@ -107,17 +109,18 @@ def cmd_read(args) -> None:
 class Arm:
     """One Metal follower driven through LeRobot with the Lab's calibration and gains."""
 
-    def __init__(self, side: str, step_deg: float) -> None:
+    def __init__(self, side: str, speed_deg_s: float) -> None:
         from lerobot.robots.metal_follower import MetalFollower, MetalFollowerConfig
 
         cfg = MetalFollowerConfig(
             id=CALIBRATION[side],
             port=PORTS[side],
             can_interface="socketcan",
-            max_relative_target=step_deg,
+            max_relative_target=MAX_LEAD_DEG,
             disable_torque_on_disconnect=True,
         )
         self.side = side
+        self.step = speed_deg_s / HZ
         self.robot = MetalFollower(cfg)
         self.poses: dict = {}
         self.target: dict[str, float] = {}
@@ -128,15 +131,26 @@ class Arm:
         now = self.robot.get_observation()
         self.gripper = now["gripper.pos"]
         self.target = {m: now[f"{m}.pos"] for m in MOTORS}
+        self.cmd = dict(self.target)  # where we are commanding each joint right now
+
+    def move_towards(self, goal: dict[str, float]) -> bool:
+        """One tick: step the command at most self.step deg per joint towards goal. True when there."""
+        done = True
+        for m in MOTORS:
+            d = goal[m] - self.cmd[m]
+            if abs(d) > self.step:
+                d, done = math.copysign(self.step, d), False
+            self.cmd[m] += d
+        action = {f"{m}.pos": self.cmd[m] for m in MOTORS}
+        action["gripper.pos"] = self.gripper
+        self.robot.send_action(action)
+        return done
 
     def tick(self, now: float) -> None:
         if self.state == "dodge" and now >= self.until:
             self.state = "bait"
             self.bait_i = random.randrange(len(self.poses["bait"]))
-        pose = self.poses["dodge" if self.state == "dodge" else "bait"][self.bait_i]
-        action = {f"{m}.pos": pose[m] for m in MOTORS}
-        action["gripper.pos"] = self.gripper
-        self.robot.send_action(action)  # max_relative_target turns this into a capped step
+        self.move_towards(self.poses["dodge" if self.state == "dodge" else "bait"][self.bait_i])
 
     def threat(self, now: float) -> None:
         if self.state != "dodge":
@@ -157,7 +171,7 @@ def cmd_nudge(args) -> None:
     if input('Type "go" to enable torque: ').strip() != "go":
         print("Not started.")
         return
-    arm = Arm(side, args.speed / HZ)
+    arm = Arm(side, args.speed)
     stopping = False
 
     def on_signal(*_):
@@ -173,9 +187,7 @@ def cmd_nudge(args) -> None:
         for pose, secs in ((start, 1.0), (goal, abs(args.delta) / args.speed + 1.0), (start, abs(args.delta) / args.speed + 1.0)):
             end = time.monotonic() + secs
             while time.monotonic() < end and not stopping:
-                action = {f"{m}.pos": pose[m] for m in MOTORS}
-                action["gripper.pos"] = arm.gripper
-                arm.robot.send_action(action)
+                arm.move_towards(pose)
                 time.sleep(1 / HZ)
             obs = arm.robot.get_observation()
             print(f"  {args.joint}: target {pose[args.joint]:.1f}, now {obs[args.joint + '.pos']:.1f}")
@@ -188,7 +200,6 @@ def cmd_nudge(args) -> None:
 
 def cmd_live(args) -> None:
     chain = Chain()
-    step = args.speed / HZ
     print(f"Arms {args.arms} will enable torque and move to bait pose 0 at most {args.speed:.0f} deg/s,")
     print("then dodge on threats from the laptop. Ctrl+C, a stop message, or losing the laptop's")
     print("heartbeat for 0.5 s turns torque off. Someone must be at the arm power the whole time.")
@@ -196,7 +207,7 @@ def cmd_live(args) -> None:
         print("Not started.")
         return
 
-    arms = {side: Arm(side, step) for side in args.arms}
+    arms = {side: Arm(side, args.speed) for side in args.arms}
     for side, arm in arms.items():
         arm.poses = arm_poses(chain, side)
     stopping = False
