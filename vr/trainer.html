@@ -1046,7 +1046,7 @@
     // ADJUST, RHYTHM and PLAY float between the player and the trainer, anchored where the player
     // stood when the menu opened. Poke one with a fingertip; a right pinch is PLAY, a left pinch
     // ADJUST. Nothing starts a round (headset or phone) until PLAY or RHYTHM.
-    function makeButton(label) {
+    function makeButton(label, size = 1) {
       // A red horizontal pill with white text; brighter, with a white rim, when a fingertip is near.
       const c = document.createElement("canvas");
       c.width = 512;
@@ -1069,18 +1069,20 @@
         x.textBaseline = "middle";
         x.fillText(label, 256, 106);
         tex.needsUpdate = true;
-        if (mesh) mesh.scale.setScalar(hot ? 1.08 : 1);
+        if (mesh) mesh.scale.setScalar(size * (hot ? 1.08 : 1));
       };
       draw(false);
       mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.1),
         new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false }));
       mesh.renderOrder = 30;
+      mesh.scale.setScalar(size);
       mesh.visible = false;
       scene.add(mesh);
       return { mesh, draw, hot: false };
     }
     const menuButtons = { adjust: makeButton("ADJUST"), rhythm: makeButton("RHYTHM"), start: makeButton("PLAY") };
     const menu = { anchored: false };
+    const MENU_REACH = 0.6;   // metres out: a deliberate reach, not something you hit as you spawn in
 
     function openMenu(perfNow) {
       game.state = "menu";
@@ -1099,6 +1101,55 @@
       else game.state = "setup";            // no arms: the trainer follows your gaze until you pinch
     }
 
+    // A fingertip inside a button presses it (true); near it lights it up.
+    function poke(b) {
+      let hot = false, pressed = false;
+      for (const h of Object.values(hands)) {
+        const tip = h.obj && JOINT(h.obj, "index-finger-tip");
+        if (!tip) continue;
+        const p = b.mesh.worldToLocal(tip.clone());
+        if (Math.abs(p.x) < 0.15 && Math.abs(p.y) < 0.07) {
+          if (Math.abs(p.z) < 0.12) hot = true;
+          if (Math.abs(p.z) < 0.025) pressed = true;
+        }
+      }
+      if (hot !== b.hot) { b.hot = hot; b.draw(hot); }
+      return pressed;
+    }
+
+    // MENU: a small pill up and to the right, anchored where it appears. Always there between
+    // rounds; during a round or a song only for its first MENU_SHOW_MS, so it can't be hit mid-fight.
+    const MENU_SHOW_MS = 10000;
+    const menuPill = makeButton("MENU", 0.7);
+    function updateMenuPill(perfNow) {
+      const st = game.state;
+      if (st !== menuPill.forState) {
+        menuPill.forState = st;
+        menuPill.since = perfNow;
+        menuPill.anchored = false;
+      }
+      const playing = st === "countdown" || st === "round" || st === "rhythm";
+      const show = st === "lobby" || st === "results" || st === "rhythmDone" || (playing && perfNow - menuPill.since < MENU_SHOW_MS);
+      menuPill.mesh.visible = show;
+      if (!show) return;
+      if (!menuPill.anchored) {
+        const dir = tmp().copy(viewerDir).setY(0).normalize();
+        const right = tmp().crossVectors(dir, Y_UP).normalize();
+        menuPill.mesh.position.copy(viewerPos).addScaledVector(dir, 0.5).addScaledVector(right, 0.4);
+        menuPill.mesh.position.y = viewerPos.y + 0.12;
+        menuPill.mesh.lookAt(viewerPos);
+        menuPill.anchored = true;
+      }
+      if (poke(menuPill) && perfNow >= game.actionAt) {
+        menuPill.hot = false;
+        menuPill.draw(false);
+        stopRhythm();
+        game.active = null;
+        openMenu(perfNow);
+        sfx.beep(false);
+      }
+    }
+
     function updateMenu(perfNow) {
       const show = game.state === "menu";
       for (const b of Object.values(menuButtons)) b.mesh.visible = show;
@@ -1107,7 +1158,7 @@
       if (!menu.anchored) {
         const dir = tmp().copy(viewerDir).setY(0).normalize();
         const right = tmp().crossVectors(dir, Y_UP).normalize();
-        const base = tmp().copy(viewerPos).addScaledVector(dir, 0.42);
+        const base = tmp().copy(viewerPos).addScaledVector(dir, MENU_REACH);
         base.y = viewerPos.y - 0.28;
         menuButtons.adjust.mesh.position.copy(base).addScaledVector(right, -0.3);
         menuButtons.rhythm.mesh.position.copy(base);
@@ -1115,20 +1166,8 @@
         for (const b of Object.values(menuButtons)) b.mesh.lookAt(viewerPos);
         menu.anchored = true;
       }
-      // A fingertip inside a button presses it; near it lights it up.
       for (const [name, b] of Object.entries(menuButtons)) {
-        let hot = false, pressed = false;
-        for (const h of Object.values(hands)) {
-          const tip = h.obj && JOINT(h.obj, "index-finger-tip");
-          if (!tip) continue;
-          const p = b.mesh.worldToLocal(tip.clone());
-          if (Math.abs(p.x) < 0.15 && Math.abs(p.y) < 0.07) {
-            if (Math.abs(p.z) < 0.12) hot = true;
-            if (Math.abs(p.z) < 0.025) pressed = true;
-          }
-        }
-        if (hot !== b.hot) { b.hot = hot; b.draw(hot); }
-        if (pressed && perfNow >= game.actionAt) {
+        if (poke(b) && perfNow >= game.actionAt) {
           b.hot = false;
           b.draw(false);
           if (name === "start") pressStart(perfNow);
@@ -1291,10 +1330,15 @@
         game.actionAt = perfNow + 600;
         if (game.starting && perfNow - game.starting < 4000) return;
         if (rig.online && rig.player) { sfx.beep(true); requestRound(); }
-        else startPractice();   // nobody linked: practice right away (not saved)
+        // nobody linked: practice needs a held right pinch (onPinchHold), so a stray pinch can't start one
       }
     }
     function onPinchHold(side, perfNow) {
+      if (side === "right" && (game.state === "lobby" || game.state === "results") && !(rig.online && rig.player)) {
+        game.actionAt = perfNow + 600;
+        startPractice();
+        return;
+      }
       if (side === "left" && ["lobby", "results", "rhythm", "rhythmDone"].includes(game.state)) {
         stopRhythm();
         openMenu(perfNow);
@@ -1525,7 +1569,7 @@
         ctx.fillText("Warm up: hit the pads!", W / 2, 240);
         ctx.font = font(52);
         ctx.fillStyle = "#ffd60a";
-        ctx.fillText("PINCH RIGHT: 60 s PRACTICE", W / 2, 350);
+        ctx.fillText("HOLD A RIGHT PINCH: 60 s PRACTICE", W / 2, 350);
         ctx.font = "500 32px system-ui";
         ctx.fillStyle = "#aaa";
         ctx.fillText("Hold a left pinch for the menu", W / 2, 430);
@@ -1605,7 +1649,7 @@
         }
         ctx.font = "500 30px system-ui";
         ctx.fillStyle = "#ddd";
-        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : "pinch right to practice";
+        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : "hold a right pinch to practice";
         ctx.fillText(game.source === "phone" ? `Saved to ${game.player || "your account"} · ${next}` : `Not saved · ${next}`, W / 2, H - 46);
         if (game.notice) { ctx.fillStyle = "#ff9f9f"; ctx.fillText(game.notice, W / 2, H - 96); }
       }
@@ -1626,6 +1670,7 @@
       if (game.state === "setup" || !trainer.root.visible) placeTrainer(viewerPos, viewerDir);
       for (const h of Object.values(hands)) if (h.obj) updateHand(h, perfNow, dt);
       updateMenu(perfNow);
+      updateMenuPill(perfNow);
       updateRhythm(perfNow);
       if (game.state === "calib") updateCalibration(perfNow);
       else updateGame();
