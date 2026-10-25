@@ -1024,7 +1024,12 @@
         game.state = "rhythmDone";
         game.actionAt = perfNow + 1500;
         sfx.bell();
-        coachSay("end", null, true);
+        // Rhythm mode is off the books: the verdict uses this song's numbers only, nothing from Convex.
+        const total = rhythm.perfect + rhythm.good + rhythm.miss;
+        const pct = total ? Math.round((100 * (rhythm.perfect + rhythm.good)) / total) : 0;
+        coachSpeak(pct >= 85 ? `${pct} percent on the beat. Alright, Fred Astaire, don't let it go to your head.`
+          : pct >= 60 ? `${pct} percent on the beat. Not bad. Not good either, mind.`
+          : `${pct} percent on the beat. My nan's got better rhythm, and she's been dead ten years.`);
       }
     }
 
