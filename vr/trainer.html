@@ -1291,7 +1291,7 @@
         game.actionAt = perfNow + 600;
         if (game.starting && perfNow - game.starting < 4000) return;
         if (rig.online && rig.player) { sfx.beep(true); requestRound(); }
-        else if (!rig.online) startPractice();
+        else startPractice();   // nobody linked: practice right away (not saved)
       }
     }
     function onPinchHold(side, perfNow) {
@@ -1605,7 +1605,7 @@
         }
         ctx.font = "500 30px system-ui";
         ctx.fillStyle = "#ddd";
-        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : rig.online ? "link a phone to play" : "pinch right to practice";
+        const next = game.starting ? "starting…" : rig.online && rig.player ? "pinch right to go again" : "pinch right to practice";
         ctx.fillText(game.source === "phone" ? `Saved to ${game.player || "your account"} · ${next}` : `Not saved · ${next}`, W / 2, H - 46);
         if (game.notice) { ctx.fillStyle = "#ff9f9f"; ctx.fillText(game.notice, W / 2, H - 96); }
       }
