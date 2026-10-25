@@ -65,7 +65,7 @@ class Bus:
             if now - self.heard > QUIET_S:
                 for mid in range(1, 8):
                     self.sock.send(struct.pack("=IB3x8s", 0x7FF, 8, bytes([mid, 0, 0xCC, 0, 0, 0, 0, 0])))
-        except OSError as e:  # bus down or adapter re-plugged: reopen next tick
+        except (OSError, RuntimeError) as e:  # bus down, adapter re-plugged or unplugged: retry next tick
             if self.sock is not None:
                 self.sock.close()
             self.sock = None
